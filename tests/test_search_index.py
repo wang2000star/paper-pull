@@ -387,7 +387,7 @@ class LinkResolverTests(unittest.TestCase):
         hit["title"] = "Protocols Secure Multi Party Computation"
         self.assertEqual(resolver.choose_doi(row, [hit]), "https://doi.org/10.1000/reordered")
 
-    def test_local_dblp_join_finishes_before_api_limits_and_requires_exact_year(self):
+    def test_local_dblp_join_finishes_before_api_limits_without_fuzzy_venue(self):
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "links.json"
             dblp = Path(temporary) / "dblp.json"
@@ -437,6 +437,83 @@ class LinkResolverTests(unittest.TestCase):
         self.assertEqual(resolver.dblp_link({**row, "venue":"CRYPTO"}, index), "")
         index["result|2024"].update(doi="", ee="https://iacr.org/paper.pdf")
         self.assertEqual(resolver.dblp_link(row, index), "")
+
+    def test_dblp_fuzzy_sequence_match_handles_math_spacing(self):
+        row = {"title":r"Constrained PRFs for $NC^{1}$ in Traditional Groups", "year":"2018", "v":"CRYPTO 2018"}
+        index = {"constrained prfs for nc1 in traditional groups|2018":
+                 {"doi":"10.1000/nc1", "v":"CRYPTO", "y":2018}}
+        match = resolver.dblp_match(row, index)
+        self.assertEqual(match["u"], "https://doi.org/10.1000/nc1")
+        self.assertEqual(match["method"], "fuzzy")
+        title = resolver.dblp_key(row).split("|")[0]
+        other = match["title"]
+        self.assertLess(len(set(title.split()) & set(other.split())) / len(set(title.split()) | set(other.split())), .85)
+        self.assertGreaterEqual(match["similarity"], .93)
+
+    def test_dblp_fuzzy_jaccard_handles_reordering(self):
+        row = {"title":"Simplex Consensus A Fast and Simple Protocol", "year":"2024", "venue":"CRYPTO"}
+        candidate = "simplex consensus a simple and fast protocol"
+        index = {candidate + "|2024":{"doi":"10.1000/reordered", "v":"CRYPTO", "y":2024}}
+        self.assertLess(resolver.SequenceMatcher(None, resolver.dblp_key(row).split("|")[0], candidate).ratio(), .93)
+        match = resolver.dblp_match(row, index)
+        self.assertEqual(match["u"], "https://doi.org/10.1000/reordered")
+        self.assertEqual(match["similarity"], 1)
+
+    def test_dblp_fuzzy_requires_venue_year_and_safe_landing(self):
+        row = {"title":"A Secure Protocol for Computing Functions", "year":"2024", "venue":"TCHES 2024"}
+        title = resolver.dblp_key(row).split("|")[0]
+        for venue in ["CHES", "TCHES"]:
+            index = {title + "|2023":{"doi":"10.1000/near", "v":venue, "y":2023}}
+            self.assertEqual(resolver.dblp_link(row, index), "https://doi.org/10.1000/near")
+            self.assertEqual(resolver.dblp_link({**row, "year":"2025"}, index), "")
+            self.assertEqual(resolver.dblp_link({**row, "venue":""}, index), "")
+            self.assertEqual(resolver.dblp_link({**row, "venue":"CRYPTO"}, index), "")
+            index[title + "|2023"].update(doi="", ee="https://iacr.org/unsafe.pdf")
+            self.assertEqual(resolver.dblp_link(row, index), "")
+        self.assertEqual(resolver.venue_family("ToSC 2024"), resolver.venue_family("FSE"))
+
+    def test_dblp_fuzzy_ranking_and_exact_priority(self):
+        row = {"title":"A Secure Protocol for Computing Functions", "year":"2024", "venue":"CRYPTO"}
+        title = resolver.dblp_key(row).split("|")[0]
+        reordered = "computing functions for a secure protocol"
+        index = {
+            reordered + "|2025":{"doi":"10.1000/later", "v":"CRYPTO", "y":2025},
+            reordered + "|2023":{"doi":"10.1000/earlier", "v":"CRYPTO", "y":2023},
+            title + "s|2023":{"doi":"10.1000/lower", "v":"CRYPTO", "y":2023},
+            title + "|2024":{"doi":"10.1000/wrong-venue", "v":"EUROCRYPT", "y":2024}}
+        self.assertEqual(resolver.dblp_link(row, index), "https://doi.org/10.1000/earlier")
+        self.assertEqual(resolver.dblp_link(row, dict(reversed(list(index.items())))), "https://doi.org/10.1000/earlier")
+        index[title + "|2024"].update(doi="10.1000/exact", v="CRYPTO")
+        self.assertEqual(resolver.dblp_match(row, index)["method"], "exact")
+        self.assertEqual(resolver.dblp_link(row, index), "https://doi.org/10.1000/exact")
+
+    def test_dblp_fuzzy_rejects_below_both_thresholds(self):
+        row = {"title":"Secure Multi Party Computation Protocols", "year":"2024", "venue":"CRYPTO"}
+        index = {"protocols for secure multi party computation|2024":
+                 {"doi":"10.1000/weak", "v":"CRYPTO", "y":2024}}
+        self.assertEqual(resolver.dblp_link(row, index), "")
+
+    def test_fuzzy_local_join_preserves_existing_dois_and_rwc_talks(self):
+        rows = [{"title":title, "year":"2018", "venue":"CRYPTO", "url":"./paper.pdf", "source":"https://iacr.org/index.html"}
+                for title in ["Constrained PRFs for NC 1 in Traditional Groups", "Constrained PRFs for NC1 in Traditional Groups"]]
+        rows.append({"title":"RWC Talk", "year":"2025", "venue":"RWC", "url":"https://rwc.iacr.org/2025/acceptedtalks.php"})
+        with tempfile.TemporaryDirectory() as temporary:
+            cache, dblp = Path(temporary) / "cache.json", Path(temporary) / "dblp.json"
+            original = {resolver.link_key(rows[0]):{"u":rows[0]["source"], "k":"index"},
+                        resolver.link_key(rows[1]):{"u":"https://doi.org/10.1000/existing", "k":"doi", "r":"openalex"}}
+            cache.write_text(json.dumps(original))
+            dblp.write_text(json.dumps({"constrained prfs for nc1 in traditional groups|2018":
+                                       {"doi":"10.1000/nc1", "v":"CRYPTO", "y":2018}}))
+            with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), contextlib.redirect_stdout(io.StringIO()):
+                report = resolver.resolve_links("unused", cache, dblp_path=dblp, max_api_requests=0, retry_index=True)
+            after = json.loads(cache.read_text())
+            self.assertEqual(report["rows"], 2)
+            self.assertEqual(report["dblpResolved"], 1)
+            self.assertEqual(len(report["dblpFuzzyUpgrades"]), 1)
+            self.assertEqual(report["apiRequests"], 0)
+            self.assertEqual(after[resolver.link_key(rows[0])]["u"], "https://doi.org/10.1000/nc1")
+            self.assertEqual(after[resolver.link_key(rows[1])], original[resolver.link_key(rows[1])])
+            self.assertFalse(resolver.needs_resolution(rows[2]))
 
 
 class PageTests(unittest.TestCase):

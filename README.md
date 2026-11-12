@@ -133,7 +133,10 @@ python3 tools/build_search_index.py
 The resolver stores title/year matches in `data/link_landing.json` (under
 1,000,000 bytes). It first joins the local `data/dblp_dois.json` index by exact
 normalized title and publication year, with venue agreement (CHES/TCHES and
-FSE/ToSC are aliases). This complete local pass runs before any API checks,
+FSE/ToSC are aliases). Exact misses retry within the same venue family and
+years ±1, accepting token-set Jaccard ≥ 0.85 or SequenceMatcher ≥ 0.93.
+Fuzzy candidates rank by higher similarity, then earlier publication year;
+an unknown venue cannot produce a fuzzy match. This complete local pass runs before any API checks,
 including when all providers are throttled or the API budget is zero. Existing
 DOI matches are preserved. For remaining misses it queries
 [OpenAlex](https://openalex.org/), then
@@ -162,8 +165,13 @@ explicitly scope an artifact to a publication-year window. The builder prints
 scan/kept/DOI/venue counts, gzip sizes and verification/parse times. The current
 full-history artifact contains 12,929 normalized title/year keys from 12,932
 IACR records, including 12,814 DOI entries, in 2,350,893 bytes. It exactly
-matches 2,656 of the 2,775 target rows (95.7%). Changed titles, math notation,
-and publication-year differences retain the proceedings-page fallback.
+matches 2,656 of the 2,775 target rows; fuzzy matching recovers another 77,
+for 2,733 matches (98.5%). In the deduplicated search results, 38 of the 64
+remaining conference fallbacks become DOI links. The primary link counts are
+17,556 ePrint, 858 DOI, 597 OJS and 59 index links: 33 unchanged RWC talks and
+26 conference titles without a qualifying fuzzy match. Truncated titles,
+long added subtitles and larger year differences retain the proceedings-page
+fallback rather than weakening the matching thresholds.
 
 The resolver defaults to at most **60 HTTP attempts total**, including retries,
 shared between both API sources. `--max-api-requests N` changes the cap; use

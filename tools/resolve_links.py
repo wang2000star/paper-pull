@@ -211,16 +211,55 @@ def dblp_key(row):
     return f"{normalized_title(query_title(row['title']))}|{int(row['year'])}"
 
 
-def dblp_link(row, index):
-    hit = index.get(dblp_key(row), {})
-    if hit.get("y") != int(row["year"]):
-        return ""
+def venue_family(value):
     aliases = {"tches":"ches", "tosc":"fse"}
-    venue = clean_text(row.get("venue", "")).casefold()
-    matched_venue = hit.get("v", "").casefold()
-    if venue and aliases.get(venue, venue) != aliases.get(matched_venue, matched_venue):
-        return ""
-    return doi_url(hit.get("doi", "")) or safe_url(hit.get("ee", ""))
+    venue = re.sub(r"\s+\d{4}$", "", clean_text(value)).casefold()
+    return aliases.get(venue, venue)
+
+
+def dblp_candidates(index):
+    """Bucket once by venue/year so fuzzy lookups never search unrelated papers."""
+    buckets = {}
+    for key, hit in index.items():
+        year, venue = hit.get("y"), venue_family(hit.get("v", ""))
+        url = doi_url(hit.get("doi", "")) or safe_url(hit.get("ee", ""))
+        if isinstance(year, int) and venue and url:
+            title = key.rsplit("|", 1)[0]
+            buckets.setdefault((venue, year), []).append((title, set(title.split()), url))
+    return buckets
+
+
+def dblp_match(row, index, buckets=None):
+    """Exact title/year first, then conservative fuzzy matching within a venue."""
+    key, year = dblp_key(row), int(row["year"])
+    title = key.rsplit("|", 1)[0]
+    venue = venue_family(row.get("venue") or row.get("v", ""))
+    hit = index.get(key, {})
+    url = doi_url(hit.get("doi", "")) or safe_url(hit.get("ee", ""))
+    if hit.get("y") == year and url and (not venue or venue == venue_family(hit.get("v", ""))):
+        return {"u":url, "title":title, "year":year, "method":"exact", "similarity":1.0}
+    tokens = set(title.split())
+    if not venue or not tokens:
+        return None  # A fuzzy title alone is insufficient without a known venue.
+    if buckets is None:
+        buckets = dblp_candidates(index)
+    candidates = []
+    for candidate_year in range(year - 1, year + 2):
+        for candidate, other, url in buckets.get((venue, candidate_year), []):
+            similarity = SequenceMatcher(None, title, candidate, autojunk=False).ratio()
+            jaccard = len(tokens & other) / len(tokens | other)
+            if jaccard >= .85 or similarity >= .93:
+                candidates.append((max(similarity, jaccard), candidate_year, candidate, url))
+    if not candidates:
+        return None
+    # Higher similarity, then earlier publication year; lexical order makes ties stable.
+    similarity, candidate_year, candidate, url = min(candidates, key=lambda item: (-item[0], item[1], item[2], item[3]))
+    return {"u":url, "title":candidate, "year":candidate_year, "method":"fuzzy", "similarity":similarity}
+
+
+def dblp_link(row, index):
+    match = dblp_match(row, index)
+    return match["u"] if match else ""
 
 
 def save_cache(path, cache):
@@ -252,19 +291,29 @@ def resolve_links(source, cache_path, *, delay=.35, retry_index=False, retry_fal
         provider.budget = budget
     rows = [row for row in iter_dict_rows(source) if needs_resolution(row)]
     dblp = json.loads(Path(dblp_path).read_text(encoding="utf-8")) if dblp_path else {}
+    buckets = dblp_candidates(dblp)
     dblp_matches, dblp_doi_matches, dblp_resolved = 0, 0, 0
+    fuzzy_matches, fuzzy_upgrades = 0, []
     # Finish the entire local join before any provider availability or request-budget check.
     for row in rows:
-        url = dblp_link(row, dblp)
-        if url:
+        match = dblp_match(row, dblp, buckets)
+        if match:
+            url = match["u"]
             dblp_matches += 1
             dblp_doi_matches += url.startswith("https://doi.org/")
+            fuzzy_matches += match["method"] == "fuzzy"
             key = link_key(row)
             if not valid_entry(cache.get(key)) or cache[key]["k"] != "doi":
                 cache[key] = {"u":url, "k":"doi", "r":"dblp"}
                 dblp_resolved += 1
+                if match["method"] == "fuzzy":
+                    fuzzy_upgrades.append({"title":row["title"], "dblpTitle":match["title"],
+                                           "year":int(row["year"]), "dblpYear":match["year"],
+                                           "similarity":match["similarity"], "u":url})
     save_cache(cache_path, cache)
-    print(f"DBLP exact title/year join: {dblp_matches:,}/{len(rows):,} matches; {dblp_resolved:,} cache upgrades", flush=True)
+    print(f"DBLP title join: {dblp_matches:,}/{len(rows):,} matches ({fuzzy_matches:,} fuzzy); {dblp_resolved:,} cache upgrades", flush=True)
+    for example in fuzzy_upgrades[:3]:
+        print(f"FUZZY: {example['title']} → {example['dblpTitle']} (DBLP normalized title): {example['u']}", flush=True)
     eligible = {}
     for row in rows:
         key = link_key(row)
@@ -313,6 +362,7 @@ def resolve_links(source, cache_path, *, delay=.35, retry_index=False, retry_fal
               "attempted":len(set().union(*(p.attempted for p in providers))), "resolved":resolved + dblp_resolved,
               "dblpMatched":dblp_matches, "dblpResolved":dblp_resolved,
               "dblpDoiMatched":dblp_doi_matches,
+              "dblpFuzzyMatched":fuzzy_matches, "dblpFuzzyUpgrades":fuzzy_upgrades,
               "apiBudget":budget.limit, "apiRequests":budget.used,
               "doi":counts["doi"], "index":counts["index"], "unmatched":counts["none"],
               "pending":pending + unprocessed, "unprocessed":unprocessed,
@@ -322,7 +372,8 @@ def resolve_links(source, cache_path, *, delay=.35, retry_index=False, retry_fal
               "updatedAt":datetime.now(timezone.utc).isoformat()}
     if report_path:
         save_cache(Path(report_path), report)
-    print("Resolution summary: " + json.dumps(report, sort_keys=True), flush=True)
+    summary = {**report, "dblpFuzzyUpgrades":len(fuzzy_upgrades)}
+    print("Resolution summary: " + json.dumps(summary, sort_keys=True), flush=True)
     return report
 
 
