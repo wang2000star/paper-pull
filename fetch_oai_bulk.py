@@ -86,7 +86,7 @@ def main():
     ap.add_argument("--from", dest="frm", help="OAI修改日期起点，默认2017-01-01（--year时默认该年元旦）")
     ap.add_argument("--until", dest="until", default=time.strftime("%Y-%m-%d"), help="结束日期 YYYY-MM-DD")
     output = ap.add_mutually_exclusive_group()
-    output.add_argument("--out-dir", default="data/papers_bulk_10y", help="按年份输出目录（默认 data/papers_bulk_10y）")
+    output.add_argument("--out-dir", default="data/papers_bulk", help="按年份输出目录（默认 data/papers_bulk）")
     output.add_argument("--out", help="兼容旧流程：输出单个CSV，替代 --out-dir")
     ap.add_argument("--year", type=int, help="只收录此ePrint年份；--restart只清空此年份的分片")
     ap.add_argument("--state", help="断点文件，默认输出路径旁的 oai_state*.txt；与查询及输出绑定")

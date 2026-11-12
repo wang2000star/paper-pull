@@ -4,17 +4,17 @@
 merge_papers.py —— 合并 ePrint 元数据源，产出指定年份范围的数据集
 
 数据来源：
-  data/papers_bulk_10y/  OAI-PMH 官方批量收割
-  data/papers_5y/、data/papers/  历史关键词和新增逐篇抓取结果
+  data/papers_bulk/  OAI-PMH 官方批量收割
+  data/papers/       逐篇抓取的关键词来源
 
 规则：
   标题/作者/摘要/分类 → 优先 OAI 批量数据，缺失时回退逐篇抓取数据
   关键词             → 仅逐篇抓取提供，随抓取进度推进而逐步补齐（未抓到的为空）
 
 可反复运行：抓取有新进展后重新执行本脚本即可刷新输出。
-用法：python merge_papers.py [--year 2026] [--bulk data/papers_bulk_10y]
-      [--crawl data/papers_5y data/papers] [--out-dir data/papers_10y]
-      [--out-5y-dir data/papers_5y] [--start-year 2017] [--end-year 2026]
+用法：python merge_papers.py [--year 2026] [--bulk data/papers_bulk]
+      [--crawl data/papers] [--out-dir data/papers_merged]
+      [--start-year 2017] [--end-year 2026]
 """
 import argparse, csv, re
 from pathlib import Path
@@ -40,14 +40,12 @@ def load(path):
 
 def main():
     ap = argparse.ArgumentParser(description="合并OAI批量数据与逐篇抓取数据")
-    ap.add_argument("--bulk", default="data/papers_bulk_10y", help="OAI目录或旧CSV")
-    ap.add_argument("--crawl", nargs="+", default=["data/papers_5y", "data/papers"],
+    ap.add_argument("--bulk", default="data/papers_bulk", help="OAI目录或旧CSV")
+    ap.add_argument("--crawl", nargs="+", default=["data/papers"],
                     help="关键词目录或旧CSV，后面的源优先")
     output = ap.add_mutually_exclusive_group()
-    output.add_argument("--out-dir", default="data/papers_10y", help="十年合并输出目录")
-    output.add_argument("--out", help="兼容旧流程的十年单CSV输出")
-    ap.add_argument("--out-5y-dir", default="data/papers_5y", help="近五年合并输出目录")
-    ap.add_argument("--five-year-start", type=int, default=2022, help="近五年窗口起点（默认2022）")
+    output.add_argument("--out-dir", default="data/papers_merged", help="合并输出目录")
+    output.add_argument("--out", help="兼容旧流程的单CSV输出")
     ap.add_argument("--year", type=int, help="只刷新此年份，保留其他年份分片")
     ap.add_argument("--missing", default="missing_ids.txt")
     ap.add_argument("--start-year", type=int, default=2017)
@@ -108,12 +106,7 @@ def main():
             writer.writerows(output_rows)
     else:
         write_shards(args.out_dir, HEADER, output_rows, years=years)
-    recent_years = [y for y in years if y >= args.five_year_start]
-    if recent_years:
-        write_shards(args.out_5y_dir, HEADER,
-                     (r for r in output_rows if int(pid_of(r).split("/")[0]) >= args.five_year_start),
-                     years=recent_years)
-    print(f"输出：{args.out or args.out_dir}、{args.out_5y_dir}（{sum(per_year.values())} 篇）")
+    print(f"输出：{args.out or args.out_dir}（{sum(per_year.values())} 篇）")
     for y in sorted(per_year):
         print(f"  {y}: {per_year[y]:>5} 篇")
     print(f"合并统计：双源 {stat['双源']}，仅OAI {stat['仅OAI']}，仅抓取 {stat['仅抓取']}，"

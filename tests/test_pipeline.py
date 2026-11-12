@@ -1,4 +1,5 @@
 import io
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -44,24 +45,37 @@ class PipelineTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", [module.__file__, *map(str, args)]), mock.patch("sys.stdout", new=io.StringIO()):
             module.main()
 
-    def test_merge_refreshes_both_windows_and_preserves_other_years(self):
-        raw, crawl, decade, recent = [self.root / p for p in ("bulk", "crawl", "10y", "5y")]
+    def test_merge_refreshes_one_corpus_and_preserves_other_years(self):
+        raw, crawl, merged = [self.root / p for p in ("bulk", "crawl", "merged")]
         write_shards(raw, bulk.CSV_HEADER, [eprint(2026, 1, "OAI title", category="category")])
         write_shards(crawl, bulk.CSV_HEADER, [eprint(2026, 1, "Crawl title", "new keyword"),
                                              eprint(2026, 2, "Crawl only", "other")])
-        for directory in (decade, recent):
-            write_shards(directory, merge_papers.HEADER, [eprint(2025, 1, "Untouched"),
-                                                         eprint(2026, 1, "Old title", "old keyword")])
-        old = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (decade / "2025.csv", recent / "2025.csv")}
-        self.call(merge_papers, ["--bulk", raw, "--crawl", recent, crawl, "--out-dir", decade,
-                                "--out-5y-dir", recent, "--year", "2026"])
-        rows = list(iter_dict_rows(decade / "2026.csv"))
+        write_shards(merged, merge_papers.HEADER, [eprint(2025, 1, "Untouched"),
+                                                 eprint(2026, 1, "Old title", "old keyword")])
+        old = merged / "2025.csv"
+        before = old.read_bytes(), old.stat().st_mtime_ns
+        self.call(merge_papers, ["--bulk", raw, "--crawl", crawl, "--out-dir", merged,
+                                "--year", "2026"])
+        rows = list(iter_dict_rows(merged / "2026.csv"))
         self.assertEqual([r["标题"] for r in rows], ["OAI title", "Crawl only"])
         self.assertEqual(rows[0]["关键词"], "new keyword")
         self.assertEqual(rows[0]["分类"], "category")
-        self.assertEqual(rows, list(iter_dict_rows(recent / "2026.csv")))
-        for path, before in old.items():
-            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.assertEqual((old.read_bytes(), old.stat().st_mtime_ns), before)
+        self.assertEqual({p.name for p in self.root.iterdir()}, {"bulk", "crawl", "merged"})
+
+    def test_merge_defaults_write_only_merged_corpus(self):
+        data = self.root / "data"
+        write_shards(data / "papers_bulk", bulk.CSV_HEADER, [eprint(2026, 1, "OAI title")])
+        row = eprint(2026, 1, "Crawl title", "keyword")
+        row.pop("分类")
+        write_shards(data / "papers", fetch_iacr.CSV_HEADER, [row])
+        subprocess.run([sys.executable, "-B", str(Path(merge_papers.__file__).resolve())],
+                       cwd=self.root, check=True, capture_output=True)
+        self.assertEqual({p.name for p in data.iterdir()}, {"papers", "papers_bulk", "papers_merged"})
+        rows = list(iter_dict_rows(data / "papers_merged"))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["标题"], "OAI title")
+        self.assertEqual(rows[0]["关键词"], "keyword")
 
     def test_landing_crawler_skips_existing_ids_and_appends_to_year(self):
         directory = self.root / "crawl"

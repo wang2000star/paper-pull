@@ -54,7 +54,7 @@ def eprint_year(row):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--eprints", default="data/papers_5y", help="ePrint shard directory or flat CSV")
+    ap.add_argument("--eprints", default="data/papers_merged", help="ePrint shard directory or flat CSV")
     ap.add_argument("--publications", default="data/iacr_publications", help="venue shard directory or flat CSV")
     ap.add_argument("--out-dir", default="data/papers_classified", help="classified year-shard directory")
     ap.add_argument("--reports-dir", default=".", help="destination for the small RWC and ranking CSVs")
