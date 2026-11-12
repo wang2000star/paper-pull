@@ -5,3 +5,4 @@ failed_ids.txt
 oai_state*.txt
 .DS_Store
 dist/
+var/

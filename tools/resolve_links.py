@@ -28,10 +28,29 @@ CACHE_BUDGET = 1_000_000
 MAX_ATTEMPTS = 6
 RATE_LIMIT_STREAK = 8
 MAX_INLINE_WAIT = 60  # Longer Retry-After values defer this source, without ignoring the deadline.
+DEFAULT_API_BUDGET = 60
 
 
 class LookupUnavailable(RuntimeError):
     pass
+
+
+class RequestBudget:
+    """A shared cap on HTTP attempts, including retries, across both providers."""
+    def __init__(self, limit):
+        if limit < 0:
+            raise ValueError("API request budget must be nonnegative")
+        self.limit = limit
+        self.used = 0
+
+    @property
+    def available(self):
+        return self.used < self.limit
+
+    def consume(self):
+        if not self.available:
+            raise LookupUnavailable("API request budget exhausted")
+        self.used += 1
 
 
 def needs_resolution(row):
@@ -90,7 +109,7 @@ def retry_after(response):
 
 
 class Provider:
-    def __init__(self, name, *, session=None, delay=.35, retry_at=0):
+    def __init__(self, name, *, session=None, delay=.35, retry_at=0, budget=None):
         self.name = name
         self.session = session or requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
@@ -101,10 +120,11 @@ class Provider:
         self.disabled = False
         self.attempted = set()
         self.stats = Counter()
+        self.budget = budget
 
     @property
     def available(self):
-        return not self.disabled and time.time() >= self.retry_at
+        return not self.disabled and time.time() >= self.retry_at and (self.budget is None or self.budget.available)
 
     def lookup(self, row):
         if not self.available:
@@ -125,6 +145,8 @@ class Provider:
         key = link_key(row)
         last_error = "lookup unavailable"
         for attempt in range(MAX_ATTEMPTS):
+            if self.budget is not None:
+                self.budget.consume()
             time.sleep(max(0, self.delay - (time.monotonic() - self.last_request)))
             self.last_request = time.monotonic()
             self.attempted.add(key)
@@ -181,7 +203,24 @@ def valid_entry(entry):
         return False
     if entry["k"] == "none":
         return entry.get("u") == ""
-    return bool(safe_url(entry.get("u", ""))) and (entry["k"] != "doi" or entry["u"].startswith("https://doi.org/"))
+    return bool(safe_url(entry.get("u", ""))) and (entry["k"] != "doi" or
+        bool(doi_url(entry.get("u", ""))) or entry.get("r") == "dblp")
+
+
+def dblp_key(row):
+    return f"{normalized_title(query_title(row['title']))}|{int(row['year'])}"
+
+
+def dblp_link(row, index):
+    hit = index.get(dblp_key(row), {})
+    if hit.get("y") != int(row["year"]):
+        return ""
+    aliases = {"tches":"ches", "tosc":"fse"}
+    venue = clean_text(row.get("venue", "")).casefold()
+    matched_venue = hit.get("v", "").casefold()
+    if venue and aliases.get(venue, venue) != aliases.get(matched_venue, matched_venue):
+        return ""
+    return doi_url(hit.get("doi", "")) or safe_url(hit.get("ee", ""))
 
 
 def save_cache(path, cache):
@@ -199,7 +238,7 @@ def save_cache(path, cache):
 
 
 def resolve_links(source, cache_path, *, delay=.35, retry_index=False, retry_fallbacks=False,
-                  providers=None, report_path=None):
+                  providers=None, report_path=None, dblp_path=None, max_api_requests=DEFAULT_API_BUDGET):
     cache_path = Path(cache_path)
     cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
     previous = {}
@@ -208,7 +247,24 @@ def resolve_links(source, cache_path, *, delay=.35, retry_index=False, retry_fal
     providers = providers if providers is not None else [
         Provider(name, delay=delay, retry_at=previous.get(name, {}).get("retryAt", 0))
         for name in ("openalex", "semantic_scholar")]
+    budget = RequestBudget(max_api_requests)
+    for provider in providers:
+        provider.budget = budget
     rows = [row for row in iter_dict_rows(source) if needs_resolution(row)]
+    dblp = json.loads(Path(dblp_path).read_text(encoding="utf-8")) if dblp_path else {}
+    dblp_matches, dblp_doi_matches, dblp_resolved = 0, 0, 0
+    # Finish the entire local join before any provider availability or request-budget check.
+    for row in rows:
+        url = dblp_link(row, dblp)
+        if url:
+            dblp_matches += 1
+            dblp_doi_matches += url.startswith("https://doi.org/")
+            key = link_key(row)
+            if not valid_entry(cache.get(key)) or cache[key]["k"] != "doi":
+                cache[key] = {"u":url, "k":"doi", "r":"dblp"}
+                dblp_resolved += 1
+    save_cache(cache_path, cache)
+    print(f"DBLP exact title/year join: {dblp_matches:,}/{len(rows):,} matches; {dblp_resolved:,} cache upgrades", flush=True)
     eligible = {}
     for row in rows:
         key = link_key(row)
@@ -220,7 +276,7 @@ def resolve_links(source, cache_path, *, delay=.35, retry_index=False, retry_fal
     try:
         for key, row in eligible.items():
             if not any(provider.available for provider in providers):
-                print("STOP: all DOI sources are deferred/rate-limited; remaining rows are pending, not completed misses", flush=True)
+                print("STOP: API budget exhausted or sources deferred/rate-limited; remaining rows are pending, not completed misses", flush=True)
                 break
             url, resolved_by, complete = "", "", True
             for provider in providers:
@@ -254,7 +310,10 @@ def resolve_links(source, cache_path, *, delay=.35, retry_index=False, retry_fal
     unprocessed = len(eligible) - processed
     counts = Counter(cache[link_key(row)]["k"] if valid_entry(cache.get(link_key(row))) else "none" for row in rows)
     report = {"rows":len(rows), "eligible":len(eligible), "processed":processed,
-              "attempted":len(set().union(*(p.attempted for p in providers))), "resolved":resolved,
+              "attempted":len(set().union(*(p.attempted for p in providers))), "resolved":resolved + dblp_resolved,
+              "dblpMatched":dblp_matches, "dblpResolved":dblp_resolved,
+              "dblpDoiMatched":dblp_doi_matches,
+              "apiBudget":budget.limit, "apiRequests":budget.used,
               "doi":counts["doi"], "index":counts["index"], "unmatched":counts["none"],
               "pending":pending + unprocessed, "unprocessed":unprocessed,
               "complete":not (pending or unprocessed or interrupted), "interrupted":interrupted,
@@ -271,13 +330,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=ROOT / "data/iacr_publications")
     parser.add_argument("--cache", type=Path, default=ROOT / "data/link_landing.json")
+    parser.add_argument("--dblp-index", type=Path, default=ROOT / "data/dblp_dois.json", help="local DBLP title/year landing index; build it first")
+    parser.add_argument("--max-api-requests", type=int, default=DEFAULT_API_BUDGET, help="shared HTTP attempt cap including retries; 0 runs only the local join")
     parser.add_argument("--delay", type=float, default=.35, help="request pacing: minimum 0.35s OpenAlex, 0.6s Semantic Scholar")
     parser.add_argument("--retry-index", action="store_true", help="retry cached index fallbacks; preserve existing DOI matches")
     parser.add_argument("--retry-fallbacks", action="store_true", help="retry both index and unmatched entries (legacy flag)")
     parser.add_argument("--report", type=Path, default=ROOT / "dist/link_resolution_report.json", help="resumable provider deadlines and per-source counts (ignored by Git)")
     args = parser.parse_args()
     report = resolve_links(args.source, args.cache, delay=args.delay, retry_index=args.retry_index,
-                           retry_fallbacks=args.retry_fallbacks, report_path=args.report)
+                           retry_fallbacks=args.retry_fallbacks, report_path=args.report,
+                           dblp_path=args.dblp_index, max_api_requests=args.max_api_requests)
     raise SystemExit(130 if report["interrupted"] else 0 if report["complete"] else 2)
 
 

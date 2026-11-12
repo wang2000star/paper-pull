@@ -125,16 +125,22 @@ No PDFs are hosted or downloaded by this page.
 After refreshing the corpus, regenerate and commit the search metadata:
 
 ```bash
-python3 tools/resolve_links.py
+python3 tools/build_dblp_index.py
+python3 tools/resolve_links.py --retry-index
 python3 tools/build_search_index.py
 ```
 
 The resolver stores title/year matches in `data/link_landing.json` (under
-1,000,000 bytes). It queries [OpenAlex](https://openalex.org/), then
+1,000,000 bytes). It first joins the local `data/dblp_dois.json` index by exact
+normalized title and publication year, with venue agreement (CHES/TCHES and
+FSE/ToSC are aliases). This complete local pass runs before any API checks,
+including when all providers are throttled or the API budget is zero. Existing
+DOI matches are preserved. For remaining misses it queries
+[OpenAlex](https://openalex.org/), then
 [Semantic Scholar](https://www.semanticscholar.org/product/api) on a miss or
-temporary failure. Matching removes LaTeX macros and punctuation, and accepts
-title similarity ≥ 0.90 or token-set Jaccard similarity ≥ 0.85, with publication
-years within ±1. OpenAlex requests include the contact address in both the
+temporary failure. API matching removes LaTeX macros and punctuation, and
+accepts title similarity ≥ 0.90 or token-set Jaccard similarity ≥ 0.85, with
+publication years within ±1. OpenAlex requests include the contact address in both the
 `mailto` query parameter and User-Agent, at least 0.35 seconds apart; Semantic
 Scholar requests are at least 0.6 seconds apart. Confident matches use DOI
 landing URLs and record their resolver in `r`; other rows use their
@@ -142,6 +148,29 @@ landing URLs and record their resolver in `r`; other rows use their
 current inputs have 2,775 PDF links requiring lookup (the 2,771 archive links counted
 on `www.iacr.org` or relative paths, plus four on other IACR hosts); six ePrint
 PDF URLs convert directly to abstract pages without a lookup.
+
+The [DBLP bulk dump](https://dblp.org/xml/) supplies CC0 metadata without
+per-title API requests. `tools/build_dblp_index.py` downloads it into ignored
+`var/dblp.xml.gz`, resumes partial downloads, validates the complete gzip before
+parsing, and streams XML while releasing each record. `--dump PATH` reuses a
+complete local dump. It extracts the specified IACR conference/journal prefixes,
+normalizes titles (including inline tags and named entities), and prefers DOI
+landing links over Springer pages and other safe web pages. The deterministic
+`data/dblp_dois.json` artifact is limited to 4,000,000 bytes; the dump and
+intermediate files stay out of Git. Optional `--start-year` and `--end-year`
+explicitly scope an artifact to a publication-year window. The builder prints
+scan/kept/DOI/venue counts, gzip sizes and verification/parse times. The current
+full-history artifact contains 12,929 normalized title/year keys from 12,932
+IACR records, including 12,814 DOI entries, in 2,350,893 bytes. It exactly
+matches 2,656 of the 2,775 target rows (95.7%). Changed titles, math notation,
+and publication-year differences retain the proceedings-page fallback.
+
+The resolver defaults to at most **60 HTTP attempts total**, including retries,
+shared between both API sources. `--max-api-requests N` changes the cap; use
+`--max-api-requests 0` for an entirely local DBLP join. The cap cannot prevent
+later local matches from being applied. DBLP electronic-edition pages without
+a DOI also use `k="doi"` as the publication-landing kind, with `r="dblp"` recording
+the source.
 
 The cache is resumable and written atomically after each row. To upgrade
 existing index fallbacks without losing DOI matches, run:
@@ -161,7 +190,8 @@ The report persists these deadlines across restarts, so retrying cannot bypass
 a server-requested cooldown.
 
 `dist/link_resolution_report.json` (ignored by Git; override with `--report`)
-records attempted/resolved counts per source, HTTP requests and 429s, pending
+records DBLP coverage/upgrades, the shared API budget, attempted/resolved
+counts per source, HTTP requests and 429s, pending
 rows, and retry deadlines. Incomplete runs exit with status 2 and retain safe
 cache entries; interrupted runs save progress and exit 130. Pending lookups are
 never reported as completed misses. Retry with the same command after the

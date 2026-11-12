@@ -160,6 +160,12 @@ class SearchIndexTests(unittest.TestCase):
         self.build(publications=self.publications)
         article = next(r for r in self.output_rows() if r["s"] == "conference")
         self.assertEqual((article["t"], article["a"], article["lk"]), ("Article title", "Official author", "doi"))
+        # A newly resolved archive duplicate must not replace the original metadata row.
+        cache = self.root / "links.json"
+        cache.write_text(json.dumps({"article title|2024":{"u":"https://doi.org/10.1000/paper", "k":"doi", "r":"dblp"}}))
+        self.build(publications=self.publications, link_cache=cache)
+        article = next(r for r in self.output_rows() if r["s"] == "conference")
+        self.assertEqual((article["t"], article["a"], article["lk"]), ("Article title", "Official author", "doi"))
 
     def test_direct_downloads_are_rejected_and_ojs_galleys_normalized(self):
         for url in ["https://iacr.org/a%2Epdf", "https://iacr.org/download/1", "https://iacr.org/a?download=1",
@@ -361,7 +367,7 @@ class LinkResolverTests(unittest.TestCase):
             cache.write_text(json.dumps(original))
             providers = [self.provider(name, self.response(429)) for name in ["openalex","semantic_scholar"]]
             with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), patch.object(resolver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
-                report = resolver.resolve_links("unused", cache, providers=providers, retry_index=True, report_path=report_path)
+                report = resolver.resolve_links("unused", cache, providers=providers, retry_index=True, report_path=report_path, max_api_requests=200)
             self.assertEqual(json.loads(cache.read_text()), original)
             self.assertEqual((report["processed"], report["unprocessed"], report["pending"]), (8,2,10))
             self.assertFalse(report["complete"])
@@ -380,6 +386,57 @@ class LinkResolverTests(unittest.TestCase):
         self.assertEqual(resolver.choose_doi(row, [hit]), "")  # Extra token falls below 0.85 Jaccard.
         hit["title"] = "Protocols Secure Multi Party Computation"
         self.assertEqual(resolver.choose_doi(row, [hit]), "https://doi.org/10.1000/reordered")
+
+    def test_local_dblp_join_finishes_before_api_limits_and_requires_exact_year(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "links.json"
+            dblp = Path(temporary) / "dblp.json"
+            rows = [{"title":title, "year":"2024", "url":"./one.pdf", "source":"https://iacr.org/index.html"}
+                    for title in [r"Secure $\unknown{MPC}$", "Wrong year", "Publisher landing", "Missing"]]
+            original = {resolver.link_key(r):{"u":r["source"], "k":"index"} for r in rows}
+            cache.write_text(json.dumps(original))
+            dblp.write_text(json.dumps({
+                "secure mpc|2024":{"doi":"10.1000/local", "ee":"https://doi.org/10.1000/local", "y":2024, "v":"CRYPTO"},
+                "wrong year|2023":{"doi":"10.1000/wrong", "ee":"", "y":2023, "v":"CRYPTO"},
+                "publisher landing|2024":{"doi":"", "ee":"https://link.springer.com/chapter/safe", "y":2024, "v":"CRYPTO"}}))
+            providers = [self.provider(name, self.response()) for name in ["openalex","semantic_scholar"]]
+            with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), contextlib.redirect_stdout(io.StringIO()):
+                report = resolver.resolve_links("unused", cache, providers=providers, dblp_path=dblp,
+                                                max_api_requests=0, retry_index=True)
+            after = json.loads(cache.read_text())
+            self.assertEqual(report["dblpMatched"], 2)
+            self.assertEqual(report["dblpResolved"], 2)
+            self.assertEqual(report["apiRequests"], 0)
+            self.assertEqual(report["pending"], 2)
+            for p in providers: p.session.get.assert_not_called()
+            self.assertEqual(after[resolver.link_key(rows[0])]["u"], "https://doi.org/10.1000/local")
+            self.assertEqual(after[resolver.link_key(rows[1])], original[resolver.link_key(rows[1])])
+            link = after[resolver.link_key(rows[2])]
+            self.assertTrue(resolver.valid_entry(link))
+            self.assertEqual(search.publication_link(rows[2], after), {"u":link["u"], "k":"doi"})
+
+    def test_shared_api_budget_counts_retries_across_providers(self):
+        budget = resolver.RequestBudget(3)
+        a = self.provider("openalex", [self.response(429), self.response()])
+        b = self.provider("semantic_scholar", self.response(429))
+        a.budget = b.budget = budget
+        with patch.object(resolver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(a.lookup({"title":"First", "year":"2024"}), "")
+            with self.assertRaisesRegex(resolver.LookupUnavailable, "budget exhausted"):
+                b.lookup({"title":"Second", "year":"2024"})
+        self.assertEqual(budget.used, 3)
+        self.assertEqual(a.session.get.call_count, 2)
+        self.assertEqual(b.session.get.call_count, 1)
+        self.assertFalse(a.available)
+        self.assertFalse(b.available)
+
+    def test_dblp_venue_aliases_and_unsafe_editions(self):
+        row = {"title":"Result", "year":"2024", "venue":"TCHES"}
+        index = {"result|2024":{"doi":"10.1000/result", "ee":"", "v":"CHES", "y":2024}}
+        self.assertEqual(resolver.dblp_link(row, index), "https://doi.org/10.1000/result")
+        self.assertEqual(resolver.dblp_link({**row, "venue":"CRYPTO"}, index), "")
+        index["result|2024"].update(doi="", ee="https://iacr.org/paper.pdf")
+        self.assertEqual(resolver.dblp_link(row, index), "")
 
 
 class PageTests(unittest.TestCase):
@@ -410,6 +467,7 @@ class PageTests(unittest.TestCase):
         self.assertIn("opens the proceedings index page", html)
         self.assertIn("OpenAlex", html)
         self.assertIn("Semantic Scholar", html)
+        self.assertIn("DBLP (CC0)", html)
         self.assertEqual((ROOT / "docs/.nojekyll").stat().st_size, 0)
 
     @unittest.skipUnless(shutil.which("node"), "Node is optional for JavaScript unit checks")

@@ -117,6 +117,12 @@ def link_key(row):
     return f"{normalized_title(clean_text(row['title']))}|{int(row['year'])}"
 
 
+def native_doi(row):
+    raw = row.get("url", "").strip()
+    return doi_url(row.get("doi", "")) or (
+        doi_url(raw) if urlsplit(raw).hostname in {"doi.org", "dx.doi.org"} else "")
+
+
 def publication_link(row, landings=None):
     raw = row.get("url", "").strip()
     parsed = urlsplit(raw)
@@ -126,13 +132,13 @@ def publication_link(row, landings=None):
         except ValueError:
             pass
     cached = (landings or {}).get(link_key(row), {}) if "title" in row and "year" in row else {}
-    doi = doi_url(row.get("doi", ""))
-    if not doi and parsed.hostname in {"doi.org", "dx.doi.org"}:
-        doi = doi_url(raw)
+    doi = native_doi(row)
     if not doi and cached.get("k") == "doi":
         doi = doi_url(cached.get("u", ""))
     if doi:
         return {"u": doi, "k": "doi"}
+    if cached.get("k") == "doi" and cached.get("r") == "dblp" and safe_url(cached.get("u", "")):
+        return {"u": safe_url(cached["u"]), "k": "doi"}
     ojs = ojs_url(raw)
     if ojs:
         return {"u": ojs, "k": "ojs"}
@@ -205,7 +211,8 @@ def build_index(source, outdir, *, publications=None, link_cache=None, total_bud
             raise ValueError("Source is missing required publication CSV columns")
         rows = sorted(iter_dict_rows(publications), key=lambda r: (
             -int(r["year"]), 0 if publication_source(r) == "journal" else 1,
-            r["venue"].casefold(), LINK_PRIORITY[publication_link(r, landings)["k"]], r["url"]))
+            r["venue"].casefold(), LINK_PRIORITY[publication_link(r, landings)["k"]],
+            not bool(native_doi(r)), r["url"]))
         for row in rows:
             kind = publication_source(row)
             input_counts[kind] += 1
