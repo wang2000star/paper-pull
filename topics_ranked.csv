@@ -1,0 +1,27 @@
+﻿rank,research_direction,2022,2023,2024,2025,2026,total_2022_2026,hot_years_gt_10,hot_topic
+1,Lattice KEM attacks and security analysis,56,62,63,72,63,316,"2022, 2023, 2024, 2025, 2026",yes
+2,Lattice reduction and PQC security estimation,36,49,54,72,70,281,"2022, 2023, 2024, 2025, 2026",yes
+3,Post-quantum cryptography implementation and leakage,38,41,51,75,59,264,"2022, 2023, 2024, 2025, 2026",yes
+4,Differential and linear cryptanalysis of block ciphers,42,45,49,55,63,254,"2022, 2023, 2024, 2025, 2026",yes
+5,Anonymous credentials and blind signatures,31,42,38,68,64,243,"2022, 2023, 2024, 2025, 2026",yes
+6,Threshold and distributed signature protocols,30,40,47,58,67,242,"2022, 2023, 2024, 2025, 2026",yes
+7,Power and electromagnetic attacks on post-quantum implementations,43,36,39,58,53,229,"2022, 2023, 2024, 2025, 2026",yes
+8,Fault injection against cryptographic implementations,36,43,40,42,37,198,"2022, 2023, 2024, 2025, 2026",yes
+9,MPC preprocessing and communication efficiency,31,30,33,50,42,186,"2022, 2023, 2024, 2025, 2026",yes
+10,Private set intersection protocols,25,27,47,42,35,176,"2022, 2023, 2024, 2025, 2026",yes
+11,Masking and leakage-resistant implementation techniques,38,32,25,27,33,155,"2022, 2023, 2024, 2025, 2026",yes
+12,Zero-knowledge proof aggregation and succinctness,20,16,43,33,33,145,"2022, 2023, 2024, 2025, 2026",yes
+13,FHE implementation and hardware acceleration,19,36,34,29,26,144,"2022, 2023, 2024, 2025, 2026",yes
+14,Dilithium/ML-DSA signature construction and optimization,20,22,23,37,39,141,"2022, 2023, 2024, 2025, 2026",yes
+15,Zero-knowledge folding and recursive proof systems,10,17,39,33,27,126,"2023, 2024, 2025, 2026",yes
+16,Malicious-secure MPC protocol construction,21,22,19,25,17,104,"2022, 2023, 2024, 2025, 2026",yes
+17,zkSNARK lookup arguments and arithmetization,14,20,18,20,24,96,"2022, 2023, 2024, 2025, 2026",yes
+18,Other lattice signature construction and efficiency,14,18,16,24,20,92,"2022, 2023, 2024, 2025, 2026",yes
+19,Falcon signature construction and implementation,12,15,15,24,24,90,"2022, 2023, 2024, 2025, 2026",yes
+20,TFHE bootstrapping improvements,13,13,16,33,13,88,"2022, 2023, 2024, 2025, 2026",yes
+21,Verifiable computation and SNARK-based applications,6,11,26,27,10,80,"2023, 2024, 2025",yes
+22,Cache and timing attacks on cryptographic implementations,13,13,13,12,14,65,"2022, 2023, 2024, 2025, 2026",yes
+23,CKKS bootstrapping improvements,4,4,10,17,24,59,"2025, 2026",yes
+24,BGV/BFV bootstrapping improvements,4,5,14,10,6,39,2024,yes
+25,FHE key switching and modulus switching,2,5,4,6,6,23,,no
+26,Universal composability proofs for multiparty protocols,2,0,1,6,3,12,,no
