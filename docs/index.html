@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Search IACR ePrint paper titles, authors, keywords and categories. A local search index, with links to the original abstract pages.">
+  <title>ePrint Paper Index — Search the cryptography corpus</title>
+  <style>
+    :root { color-scheme:light; --bg:#f6f5f0; --paper:#fffefa; --ink:#192c32; --muted:#566870; --line:#d8ded9; --accent:#176550; --wash:#e8efe9; --mark:#f8df89; --error:#9e3030; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    a { color:inherit; text-underline-offset:4px; }
+    button,input,select { font:inherit; }
+    button,select { cursor:pointer; }
+    button { color:var(--ink); }
+    :focus-visible { outline:3px solid var(--accent); outline-offset:4px; }
+    .skip-link { position:absolute; top:-100px; left:20px; z-index:5; padding:8px 16px; background:var(--paper); }
+    .skip-link:focus { top:12px; }
+    .shell { width:min(1120px,calc(100% - 64px)); margin:auto; }
+    .masthead { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:26px 0; border-bottom:1px solid var(--line); }
+    .brand { display:flex; align-items:center; gap:12px; font-size:14px; font-weight:750; letter-spacing:.03em; }
+    .brand-mark { display:grid; place-items:center; height:34px; width:34px; background:var(--ink); color:var(--paper); border-radius:7px; font:italic 24px Georgia,serif; }
+    .repo-link { font-size:13px; color:var(--muted); }
+    .hero { padding:60px 0 34px; max-width:850px; }
+    .eyebrow { margin:0 0 16px; color:var(--accent); font-size:11px; font-weight:800; letter-spacing:.18em; text-transform:uppercase; }
+    h1 { margin:0 0 16px; font:normal clamp(40px,6vw,65px)/1.08 Georgia,"Times New Roman",serif; letter-spacing:-.035em; }
+    .intro { max-width:650px; margin:0; color:var(--muted); font-size:16px; }
+    .search-panel { padding:24px; border:1px solid var(--line); border-radius:12px; background:var(--paper); box-shadow:0 3px 0 #192c3205; }
+    .search-label { display:block; margin-bottom:9px; font-size:13px; font-weight:700; }
+    .search-wrap { display:flex; align-items:center; gap:12px; border:1px solid var(--muted); border-radius:7px; padding:0 16px; }
+    .search-wrap:focus-within { outline:2px solid var(--accent); outline-offset:2px; }
+    .search-wrap svg { width:21px; flex-shrink:0; color:var(--accent); }
+    #query { width:100%; min-width:0; padding:16px 0; border:0; outline:none; background:transparent; color:var(--ink); font-size:18px; }
+    #query::placeholder { color:var(--muted); opacity:.9; }
+    kbd { padding:0 7px; border:1px solid var(--line); border-radius:4px; color:var(--muted); font:13px/24px ui-monospace,monospace; }
+    .hint { margin:10px 0 22px; color:var(--muted); font-size:12px; }
+    .filters { display:grid; grid-template-columns:1fr 1fr 2fr 1.4fr auto; gap:14px; align-items:end; }
+    .filter label { display:block; margin-bottom:5px; color:var(--muted); font-size:11px; font-weight:750; letter-spacing:.04em; text-transform:uppercase; }
+    select { width:100%; min-height:42px; padding:8px 28px 8px 10px; border:1px solid var(--line); border-radius:5px; background:var(--paper); color:var(--ink); font-size:13px; }
+    select:disabled { cursor:wait; opacity:.7; }
+    .quiet-button { border:0; border-radius:5px; background:transparent; padding:10px 8px; color:var(--accent); font-size:13px; font-weight:650; }
+    .quiet-button:hover { background:var(--wash); }
+    .results-bar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:29px 0 8px; padding-bottom:12px; border-bottom:1px solid var(--line); }
+    #result-count { margin:0; color:var(--muted); font-size:13px; }
+    .local-note { color:var(--accent); font-size:11px; font-weight:600; white-space:nowrap; }
+    .local-note::before { content:""; display:inline-block; width:6px; height:6px; margin-right:6px; border-radius:50%; background:var(--accent); vertical-align:middle; }
+    #results { list-style:none; padding:0; margin:0; }
+    .card { padding:25px 4px; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+    .card h2 { margin:0 0 7px; font:normal 23px/1.35 Georgia,"Times New Roman",serif; letter-spacing:-.012em; }
+    .paper-link { text-decoration:none; }
+    .paper-link:hover { color:var(--accent); text-decoration:underline; }
+    .paper-link::after { content:" ↗"; color:var(--accent); font:16px system-ui,sans-serif; white-space:nowrap; }
+    .authors { margin:0 0 5px; font-size:13px; color:var(--muted); }
+    .paper-meta { margin:0; color:var(--accent); font-size:12px; font-weight:650; }
+    .keywords { display:flex; gap:6px; flex-wrap:wrap; margin-top:12px; }
+    .chip { padding:2px 8px; background:var(--wash); border-radius:4px; font-size:11px; }
+    .snippet { max-width:920px; margin:12px 0 0; color:var(--muted); font-size:13px; line-height:1.7; }
+    mark { color:var(--ink); background:var(--mark); padding:0 .04em; border-radius:2px; }
+    .state { padding:54px 12px 64px; text-align:center; }
+    .state h2 { margin:0 0 10px; font:normal 29px/1.3 Georgia,"Times New Roman",serif; }
+    .state p { max-width:570px; margin:0 auto 20px; font-size:14px; color:var(--muted); }
+    .examples { display:flex; justify-content:center; gap:8px; flex-wrap:wrap; }
+    .example { border:1px solid var(--line); border-radius:20px; background:var(--paper); padding:7px 14px; font-size:12px; }
+    .example:hover { border-color:var(--accent); color:var(--accent); }
+    .primary-button { border:1px solid var(--accent); background:var(--accent); color:var(--paper); padding:10px 22px; border-radius:6px; font-size:13px; font-weight:650; }
+    .primary-button:hover { filter:brightness(.9); }
+    .browse { display:block; margin:19px auto 0; }
+    #error-state h2 { color:var(--error); }
+    .spinner { display:block; width:27px; height:27px; margin:0 auto 18px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    @media (prefers-reduced-motion:reduce) { .spinner { animation:none; } }
+    .more-wrap { text-align:center; padding:26px 0; }
+    footer { display:flex; justify-content:space-between; gap:16px; margin-top:34px; padding:22px 0 30px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+    footer p { margin:0; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+    [hidden] { display:none !important; }
+    @media (max-width:700px) {
+      .shell { width:calc(100% - 32px); }
+      .hero { padding:38px 0 26px; }
+      .search-panel { padding:17px; }
+      .filters { grid-template-columns:1fr 1fr; gap:12px; }
+      .filter-category { grid-column:1 / -1; }
+      .filter-sort { grid-column:1; }
+      #reset { justify-self:end; }
+      #query { font-size:16px; }
+      .search-wrap { padding:0 12px; gap:9px; }
+      kbd { display:none; }
+      .local-note { display:none; }
+      .card h2 { font-size:21px; }
+      footer { flex-direction:column; gap:8px; }
+    }
+    @media (prefers-color-scheme:dark) {
+      :root { color-scheme:dark; --bg:#151e20; --paper:#1b2729; --ink:#e9ede7; --muted:#b0bdb8; --line:#384a49; --accent:#9ed5b6; --wash:#293d36; --mark:#665224; --error:#f3a5a5; }
+      .primary-button { color:var(--bg); }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#search-area">Skip to search</a>
+  <div class="shell">
+    <header class="masthead">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">e</span> ePrint Paper Index</div>
+      <a class="repo-link" href="https://github.com/wang2000star/paper-pull" target="_blank" rel="noopener noreferrer">View repository ↗</a>
+    </header>
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">A field guide to cryptography research</p>
+        <h1 id="page-title">Find the paper.<br>Follow the idea.</h1>
+        <p class="intro">Search across a decade of IACR ePrint research. Explore titles, authors, keywords and categories, then go straight to the original paper page.</p>
+      </section>
+      <section id="search-area" class="search-panel" aria-label="Search and filters">
+        <label class="search-label" for="query">What are you researching?</label>
+        <div class="search-wrap">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.5" cy="10.5" r="6.8"></circle><path d="m16 16 5 5"></path></svg>
+          <input id="query" type="search" placeholder="Try homomorphic encryption…" autocomplete="off" spellcheck="false" aria-describedby="search-hint" aria-controls="results">
+          <kbd aria-hidden="true">/</kbd>
+        </div>
+        <p id="search-hint" class="hint">Every word must match. Use quotes for a phrase, like “oblivious transfer”. Searches cover titles, authors, keywords and categories.</p>
+        <div class="filters">
+          <div class="filter"><label for="year-from">From year</label><select id="year-from"></select></div>
+          <div class="filter"><label for="year-to">To year</label><select id="year-to"></select></div>
+          <div class="filter filter-category"><label for="category">Category</label><select id="category" disabled><option value="">All categories</option></select></div>
+          <div class="filter filter-sort"><label for="sort">Sort by</label><select id="sort"><option value="year">Newest first</option><option value="title">Title A–Z</option></select></div>
+          <button id="reset" class="quiet-button" type="button">Clear filters</button>
+        </div>
+      </section>
+      <div class="results-bar">
+        <p id="result-count" role="status" aria-live="polite" aria-atomic="true">17,563 papers · ready to search</p>
+        <span class="local-note">Search stays in your browser</span>
+      </div>
+      <section id="result-area" aria-label="Search results" aria-busy="false">
+        <div id="welcome-state" class="state">
+          <h2>A whole archive. One search away.</h2>
+          <p>Start with a topic, a construction, or an author. The metadata index loads once; after that, keep exploring without a connection.</p>
+          <div class="examples">
+            <button class="example" type="button" data-query="homomorphic encryption">homomorphic encryption</button>
+            <button class="example" type="button" data-query='"oblivious transfer"'>“oblivious transfer”</button>
+            <button class="example" type="button" data-query="zero knowledge">zero knowledge</button>
+          </div>
+          <button id="browse" class="quiet-button browse" type="button">Or browse all papers →</button>
+        </div>
+        <div id="loading-state" class="state" hidden><span class="spinner" aria-hidden="true"></span><h2>Opening the index…</h2><p>Loading metadata for all years. Your searches will run locally.</p></div>
+        <div id="empty-state" class="state" hidden><h2>No papers found.</h2><p>Try fewer words, a broader year range, or a different category. Every search term must appear in the indexed metadata.</p><button id="clear-empty" class="quiet-button" type="button">Clear search and filters</button></div>
+        <div id="error-state" class="state" role="alert" hidden><h2>The index could not be loaded.</h2><p id="error-message"></p><button id="retry" class="primary-button" type="button">Try again</button></div>
+        <ol id="results"></ol>
+        <div id="more-wrap" class="more-wrap" hidden><button id="show-more" class="primary-button" type="button">Show 50 more</button></div>
+      </section>
+      <noscript><p>This search needs JavaScript enabled. The source CSV corpus is available in the repository.</p></noscript>
+    </main>
+    <footer>
+      <p><span id="corpus-summary">17,563 papers · 2017–2026</span><br>Metadata from IACR ePrint Archive (CC0), no PDFs hosted.</p>
+      <p>Built from <a href="https://github.com/wang2000star/paper-pull" target="_blank" rel="noopener noreferrer">paper-pull ↗</a><br>Titles link to the original ePrint abstract pages.</p>
+    </footer>
+  </div>
+  <script>
+    "use strict";
+    const SearchCore = (() => {
+      const fold = text => String(text || "").toLowerCase();
+      const terms = query => [...query.matchAll(/"([^"]*)"|([^\s"]+)/gu)]
+        .map(match => fold((match[1] ?? match[2]).trim())).filter(Boolean);
+      const category = paper => paper.c || "__uncategorized__";
+      const prepare = paper => ({ ...paper, searchText: fold([paper.t, paper.a, paper.k, paper.c, paper.s || ""].join(" ")) });
+      const matches = (paper, words, from, to, cat) => paper.y >= from && paper.y <= to &&
+        (!cat || category(paper) === cat) && words.every(word => paper.searchText.includes(word));
+      const compare = mode => (a, b) => mode === "title"
+        ? a.t.localeCompare(b.t, "en") || b.y - a.y || a.u.localeCompare(b.u)
+        : b.y - a.y || a.t.localeCompare(b.t, "en") || a.u.localeCompare(b.u);
+      const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const highlightRanges = (text, words) => {
+        if (!words.length) return [];
+        const pattern = new RegExp([...new Set(words)].sort((a, b) => b.length - a.length).map(escape).join("|"), "giu");
+        return [...text.matchAll(pattern)].map(match => [match.index, match.index + match[0].length]);
+      };
+      return { terms, prepare, matches, compare, highlightRanges };
+    })();
+
+    (() => {
+      const $ = id => document.getElementById(id);
+      const input = $("query"), from = $("year-from"), to = $("year-to"), cat = $("category"), sort = $("sort");
+      const PAGE_SIZE = 50;
+      let years = Array.from({ length:10 }, (_, i) => 2017 + i);
+      let papers = [], filtered = [], phase = "idle", pending = null, limit = PAGE_SIZE, timer;
+      const initial = new URLSearchParams(location.search);
+      let desiredCategory = initial.get("cat") || "";
+      const number = value => value.toLocaleString("en-US");
+      const option = (value, text) => new Option(text, String(value));
+      const element = (tag, className, text) => {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      };
+      function populateYears(start, end) {
+        from.replaceChildren(...years.map(year => option(year, year)));
+        to.replaceChildren(...years.map(year => option(year, year)));
+        from.value = years.includes(Number(start)) ? start : years[0];
+        to.value = years.includes(Number(end)) ? end : years[years.length - 1];
+        if (Number(from.value) > Number(to.value)) to.value = from.value;
+      }
+      const initialYear = /^(\d{4})(?:-(\d{4}))?$/.exec(initial.get("year") || "");
+      populateYears(initialYear?.[1], initialYear ? (initialYear[2] || initialYear[1]) : undefined);
+      input.value = initial.get("q") || "";
+      sort.value = initial.get("sort") === "title" ? "title" : "year";
+
+      function syncURL() {
+        if (location.protocol === "file:") return;
+        const url = new URL(location.href);
+        const values = {
+          q:input.value.trim(),
+          year:from.value === String(years[0]) && to.value === String(years[years.length - 1]) ? "" :
+            from.value === to.value ? from.value : `${from.value}-${to.value}`,
+          cat:cat.value || desiredCategory,
+          sort:sort.value === "title" ? "title" : ""
+        };
+        for (const [key, value] of Object.entries(values)) value ? url.searchParams.set(key, value) : url.searchParams.delete(key);
+        history.replaceState(null, "", url.pathname + url.search + url.hash);
+      }
+      function highlighted(node, text, words) {
+        let position = 0;
+        for (const [start, end] of SearchCore.highlightRanges(text, words)) {
+          node.append(document.createTextNode(text.slice(position, start)), element("mark", "", text.slice(start, end)));
+          position = end;
+        }
+        node.append(document.createTextNode(text.slice(position)));
+      }
+      function showState(id) {
+        for (const name of ["welcome-state", "loading-state", "empty-state", "error-state"]) $(name).hidden = name !== id;
+        $("result-area").setAttribute("aria-busy", phase === "loading" ? "true" : "false");
+      }
+      function render() {
+        $("results").replaceChildren();
+        $("more-wrap").hidden = true;
+        if (phase === "idle") { showState("welcome-state"); return; }
+        if (phase === "loading") { showState("loading-state"); $("result-count").textContent = "Loading paper metadata…"; return; }
+        if (phase === "error") { showState("error-state"); $("result-count").textContent = "Metadata unavailable"; return; }
+        const words = SearchCore.terms(input.value);
+        filtered = papers.filter(paper => SearchCore.matches(paper, words, Number(from.value), Number(to.value), cat.value));
+        filtered.sort(SearchCore.compare(sort.value));
+        const visible = filtered.slice(0, limit);
+        $("result-count").textContent = `Showing ${number(visible.length)} of ${number(filtered.length)} matches`;
+        showState(filtered.length ? "" : "empty-state");
+        const fragment = document.createDocumentFragment();
+        for (const paper of visible) {
+          const card = element("li", "card"), heading = element("h2"), link = element("a", "paper-link");
+          link.href = paper.u; link.target = "_blank"; link.rel = "noopener noreferrer";
+          highlighted(link, paper.t, words);
+          link.append(element("span", "sr-only", " (opens in a new tab)"));
+          heading.append(link);
+          card.append(heading, element("p", "authors", paper.a || "Authors not listed"),
+            element("p", "paper-meta", `${paper.y} · ${paper.c || "Uncategorized"}`));
+          const keywords = paper.k.split(/[;；]/u).map(word => word.trim()).filter(Boolean);
+          if (keywords.length) {
+            const chips = element("div", "keywords");
+            for (const keyword of keywords) { const chip = element("span", "chip"); highlighted(chip, keyword, words); chips.append(chip); }
+            card.append(chips);
+          }
+          if (paper.s) { const snippet = element("p", "snippet"); highlighted(snippet, paper.s, words); card.append(snippet); }
+          fragment.append(card);
+        }
+        $("results").append(fragment);
+        $("more-wrap").hidden = visible.length >= filtered.length;
+        $("show-more").textContent = `Show ${Math.min(PAGE_SIZE, filtered.length - visible.length)} more`;
+      }
+
+      async function json(path) {
+        const response = await fetch(path);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      }
+      async function loadData() {
+        if (phase === "ready") return;
+        if (pending) return pending;
+        phase = "loading"; render();
+        pending = (async () => {
+          try {
+            if (location.protocol === "file:") throw new Error("file protocol");
+            const manifest = await json("data/manifest.json");
+            if (manifest.version !== 1 || !Array.isArray(manifest.files) || !manifest.files.length) throw new Error("Invalid manifest");
+            const shards = await Promise.all(manifest.files.map(async shard => {
+              if (!/^\d{4}\.json$/.test(shard.file)) throw new Error("Invalid shard path");
+              const rows = await json(`data/${shard.file}`);
+              if (!Array.isArray(rows) || rows.length !== shard.n) throw new Error("Incomplete shard");
+              return rows;
+            }));
+            const rows = shards.flat();
+            if (rows.length !== manifest.count || !rows.every(paper =>
+              typeof paper.t === "string" && typeof paper.a === "string" && typeof paper.k === "string" &&
+              typeof paper.c === "string" && Number.isInteger(paper.y) && /^https:\/\/eprint\.iacr\.org\/\d{4}\/\d+$/.test(paper.u) &&
+              (paper.s === undefined || typeof paper.s === "string"))) throw new Error("Invalid paper metadata");
+            papers = rows.map(SearchCore.prepare);
+            const oldFrom = from.value, oldTo = to.value;
+            years = [...new Set(rows.map(paper => paper.y))].sort((a, b) => a - b);
+            populateYears(oldFrom, oldTo);
+            const categories = [...new Set(rows.map(paper => paper.c || "__uncategorized__"))];
+            if (desiredCategory && !categories.includes(desiredCategory)) categories.push(desiredCategory);
+            categories.sort((a, b) => a.localeCompare(b, "en"));
+            cat.replaceChildren(option("", "All categories"), ...categories.map(value => option(value, value === "__uncategorized__" ? "Uncategorized" : value)));
+            cat.value = desiredCategory; cat.disabled = false;
+            $("corpus-summary").textContent = `${number(papers.length)} papers · ${years[0]}–${years[years.length - 1]}`;
+            if (manifest.snippetLength) $("search-hint").textContent += " Abstract snippets are also searchable.";
+            phase = "ready"; syncURL(); render();
+          } catch (error) {
+            phase = "error";
+            $("error-message").textContent = location.protocol === "file:"
+              ? "This page cannot load its index from file://. Open it through GitHub Pages after publishing is enabled, or serve the docs folder with a static HTTP server."
+              : "The metadata JSON could not be fetched. Check your connection and try again. If you are hosting this page, publish the complete docs folder, including data/.";
+            render();
+          } finally { pending = null; }
+        })();
+        return pending;
+      }
+      function search(immediate = false) {
+        clearTimeout(timer); limit = PAGE_SIZE; syncURL();
+        timer = setTimeout(async () => { await loadData(); if (phase === "ready") render(); }, immediate ? 0 : 120);
+      }
+      function clear() {
+        input.value = ""; desiredCategory = ""; cat.value = ""; sort.value = "year";
+        populateYears(years[0], years[years.length - 1]); search(true); input.focus();
+      }
+      input.addEventListener("focus", loadData);
+      input.addEventListener("input", () => search());
+      from.addEventListener("change", () => { if (Number(from.value) > Number(to.value)) to.value = from.value; search(true); });
+      to.addEventListener("change", () => { if (Number(to.value) < Number(from.value)) from.value = to.value; search(true); });
+      for (const select of [from, to, sort]) select.addEventListener("focus", loadData);
+      cat.addEventListener("change", () => { desiredCategory = cat.value; search(true); });
+      sort.addEventListener("change", () => search(true));
+      for (const id of ["reset", "clear-empty"]) $(id).addEventListener("click", clear);
+      $("browse").addEventListener("click", () => search(true));
+      $("retry").addEventListener("click", loadData);
+      document.querySelectorAll("[data-query]").forEach(button => button.addEventListener("click", () => {
+        input.value = button.dataset.query; search(true); input.focus();
+      }));
+      $("show-more").addEventListener("click", () => { const previous = limit; limit += PAGE_SIZE; render(); $("results").children[previous]?.querySelector("a").focus({ preventScroll:true }); });
+      document.addEventListener("keydown", event => {
+        if (event.key === "/" && !event.ctrlKey && !event.metaKey && !event.altKey &&
+            !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) && !document.activeElement.isContentEditable) {
+          event.preventDefault(); input.focus();
+        }
+      });
+      if (["q", "year", "cat", "sort"].some(key => initial.has(key))) loadData();
+      else render();
+    })();
+  </script>
+</body>
+</html>

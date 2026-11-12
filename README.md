@@ -108,3 +108,48 @@ headers/BOMs/year placement, and compares exact multisets of data rows while
 ignoring repeated headers. Duplicate data rows are preserved.
 
 Offline regression checks: `python3 -B -m unittest discover -s tests -v`.
+
+## Keyword search on GitHub Pages
+
+`docs/index.html` is a separate, responsive search page for the merged ePrint
+corpus. The root `index.html` remains the CryptoScope dashboard. Search runs
+in the browser with AND terms, quoted phrases, year/category filters, sorting,
+and shareable query URLs. Result titles open the original ePrint **abstract
+landing page**; no PDFs are hosted or downloaded by this page.
+
+After refreshing the corpus, regenerate and commit the search metadata:
+
+```bash
+python3 tools/build_search_index.py
+```
+
+The builder reads `data/papers_merged/` and writes `docs/data/<year>.json`
+plus a small `manifest.json`. It deduplicates landing-page URLs, retains up
+to four authors, and reports source/deduplicated counts and UTF-8 byte sizes.
+The total JSON payload is limited to 6,000,000 bytes and each file to
+1,500,000 bytes. Abstract snippets start at 180 characters, fall back to 120,
+then are omitted if needed. The current 17,563-paper index needs the last
+fallback: 4,403,730 bytes, with titles, authors, keywords and categories
+searchable. Full abstracts are not fetched. Year files load in parallel on
+the first interaction; subsequent searches need no network connection.
+
+To enable publishing in [GitHub's Pages settings](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site):
+
+1. Open `wang2000star/paper-pull` on GitHub and select **Settings**.
+2. Select **Pages** in the settings sidebar.
+3. Under **Build and deployment → Source**, choose **Deploy from a branch**.
+4. Choose branch **main** and folder **/docs**, then click **Save**.
+5. Wait for the Pages deployment to complete and open the URL shown there
+   (normally `https://wang2000star.github.io/paper-pull/`).
+
+The hosted search works only after Pages is enabled and deployed. For local
+use, run a static server instead of opening the HTML through `file://`:
+
+```bash
+python3 -m http.server 8000 --directory docs
+# Open http://localhost:8000/ ; stop with Ctrl-C.
+```
+
+The page uses only its inline CSS/JavaScript and local JSON, with no external
+fonts, libraries, trackers, or runtime build step. `docs/.nojekyll` keeps the
+static payload available as-is.
