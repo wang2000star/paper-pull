@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Resolve archival paper links through OpenAlex; cache safe page fallbacks."""
+"""Resolve archival links via OpenAlex/Semantic Scholar, preserving safe fallbacks."""
 import argparse
 import json
 import os
+import re
 import tempfile
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -19,11 +22,15 @@ else:
     from build_search_index import ROOT, clean_text, doi_url, landing_url, link_key, normalized_title, ojs_url, safe_url
     from shards import iter_dict_rows
 
-USER_AGENT = "paper-pull-link-resolver/1.0 (mailto=wangfangzhen23@mails.ucas.ac.cn)"
+CONTACT = "wangfangzhen23@mails.ucas.ac.cn"
+USER_AGENT = f"paper-pull-link-resolver/2.0 (mailto={CONTACT})"
 CACHE_BUDGET = 1_000_000
+MAX_ATTEMPTS = 6
+RATE_LIMIT_STREAK = 8
+MAX_INLINE_WAIT = 60  # Longer Retry-After values defer this source, without ignoring the deadline.
 
 
-class QuotaExhausted(RuntimeError):
+class LookupUnavailable(RuntimeError):
     pass
 
 
@@ -40,47 +47,133 @@ def needs_resolution(row):
     return True
 
 
+def query_title(value):
+    text = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^]]*\])?", " ", clean_text(value))
+    return " ".join(re.sub(r"[$}{]", " ", text).split())
+
+
 def choose_doi(row, hits):
-    title = normalized_title(clean_text(row["title"]))
+    title = normalized_title(query_title(row["title"]))
+    tokens = set(title.split())
     candidates = []
+    if not tokens:
+        return ""
     for hit in hits:
-        year = hit.get("publication_year")
-        url = doi_url(hit.get("doi", ""))
+        year = hit.get("publication_year", hit.get("year"))
+        url = doi_url(hit.get("doi") or (hit.get("externalIds") or {}).get("DOI", ""))
         if not isinstance(year, int) or abs(year - int(row["year"])) > 1 or not url:
             continue
-        candidate = normalized_title(clean_text(hit.get("title", "")))
+        candidate = normalized_title(query_title(hit.get("title", "")))
+        other = set(candidate.split())
         similarity = SequenceMatcher(None, title, candidate, autojunk=False).ratio()
-        if similarity >= .92:
-            candidates.append((similarity, -abs(year - int(row["year"])), url))
+        jaccard = len(tokens & other) / len(tokens | other)
+        if similarity >= .90 or jaccard >= .85:
+            candidates.append((max(similarity, jaccard), similarity, jaccard, -abs(year - int(row["year"])), url))
     if not candidates:
         return ""
     candidates.sort(reverse=True)
     best = candidates[0]
-    if len({item[2] for item in candidates if item[:2] == best[:2]}) != 1:
+    if len({item[-1] for item in candidates if item[:-1] == best[:-1]}) != 1:
         return ""  # Equally good but conflicting DOIs are not confident matches.
-    return best[2]
+    return best[-1]
 
 
-def lookup(session, row, delay, last_request):
-    for attempt in range(3):
-        time.sleep(max(0, delay - (time.monotonic() - last_request[0])))
-        last_request[0] = time.monotonic()
-        response = session.get("https://api.openalex.org/works", params={
-            "filter": "title.search:" + clean_text(row["title"]),
-            "per-page": 5, "select": "doi,title,publication_year",
-        }, timeout=30)
-        if response.status_code == 429:
-            body = response.json()
-            if body.get("dailyRemainingUsd") == 0 or "insufficient budget" in body.get("message", "").casefold():
-                raise QuotaExhausted("OpenAlex shared daily budget exhausted; no further API requests in this run")
-        if response.status_code == 429 or response.status_code >= 500:
-            if attempt < 2:
-                retry_after = response.headers.get("Retry-After", "")
-                time.sleep(min(30, float(retry_after)) if retry_after.isdigit() else 2 ** (attempt + 1))
-                continue
-        response.raise_for_status()
-        return choose_doi(row, response.json().get("results", []))
-    return ""
+def retry_after(response):
+    value = response.headers.get("Retry-After", "")
+    try:
+        return max(0, float(value))
+    except (ValueError, TypeError):
+        try:
+            return max(0, parsedate_to_datetime(value).timestamp() - time.time())
+        except (ValueError, TypeError, OverflowError):
+            return 0
+
+
+class Provider:
+    def __init__(self, name, *, session=None, delay=.35, retry_at=0):
+        self.name = name
+        self.session = session or requests.Session()
+        self.session.headers["User-Agent"] = USER_AGENT
+        self.delay = max(.35 if name == "openalex" else .6, delay)
+        self.last_request = 0
+        self.retry_at = retry_at
+        self.limited_keys = set()
+        self.disabled = False
+        self.attempted = set()
+        self.stats = Counter()
+
+    @property
+    def available(self):
+        return not self.disabled and time.time() >= self.retry_at
+
+    def lookup(self, row):
+        if not self.available:
+            raise LookupUnavailable(f"{self.name} is deferred or rate-limited")
+        title = query_title(row["title"])
+        headers = {}
+        if self.name == "openalex":
+            endpoint = "https://api.openalex.org/works"
+            params = {"filter":"title.search:" + title, "per-page":5,
+                      "select":"doi,title,publication_year", "mailto":CONTACT}
+            if os.environ.get("OPENALEX_API_KEY"):
+                headers["Authorization"] = "Bearer " + os.environ["OPENALEX_API_KEY"]
+        else:
+            endpoint = "https://api.semanticscholar.org/graph/v1/paper/search"
+            params = {"query":title, "limit":5, "fields":"title,year,externalIds"}
+            if os.environ.get("SEMANTIC_SCHOLAR_API_KEY"):
+                headers["x-api-key"] = os.environ["SEMANTIC_SCHOLAR_API_KEY"]
+        key = link_key(row)
+        last_error = "lookup unavailable"
+        for attempt in range(MAX_ATTEMPTS):
+            time.sleep(max(0, self.delay - (time.monotonic() - self.last_request)))
+            self.last_request = time.monotonic()
+            self.attempted.add(key)
+            self.stats["httpRequests"] += 1
+            wait = 2 ** (attempt + 1)
+            try:
+                response = self.session.get(endpoint, params=params, headers=headers, timeout=30)
+            except requests.RequestException as error:
+                last_error = type(error).__name__
+                self.stats["transportErrors"] += 1
+            else:
+                status = response.status_code
+                last_error = f"HTTP {status}"
+                if status == 429:
+                    self.stats["http429"] += 1
+                    self.limited_keys.add(key)  # Retries of one query count only once.
+                    server_wait = retry_after(response)
+                    wait = max(wait, server_wait)
+                    if server_wait > MAX_INLINE_WAIT:
+                        self.retry_at = time.time() + server_wait
+                        print(f"DEFER {self.name}: HTTP 429, Retry-After {server_wait:.0f}s; continuing with other source", flush=True)
+                        raise LookupUnavailable(f"{self.name}: Retry-After until {self.retry_at:.0f}")
+                    if attempt + 1 == MAX_ATTEMPTS and server_wait:
+                        time.sleep(server_wait)  # The next title must respect the last response too.
+                else:
+                    self.limited_keys.clear()  # Any non-429 response breaks the consecutive streak.
+                    if status < 400:
+                        hits = response.json().get("results" if self.name == "openalex" else "data", [])
+                        url = choose_doi(row, hits)
+                        self.stats["resolved" if url else "misses"] += 1
+                        return url
+                    if status < 500:
+                        self.stats["httpErrors"] += 1
+                        raise LookupUnavailable(f"{self.name}: HTTP {status}")
+            if attempt + 1 < MAX_ATTEMPTS:
+                print(f"RETRY {self.name}: {last_error}; attempt {attempt + 2}/{MAX_ATTEMPTS} in {wait:.1f}s", flush=True)
+                time.sleep(wait)
+        self.stats["exhaustedRequests"] += 1
+        if len(self.limited_keys) >= RATE_LIMIT_STREAK:
+            self.disabled = True
+            print(f"RATE LIMIT {self.name}: {len(self.limited_keys)} consecutive distinct queries throttled; saving resumable progress", flush=True)
+        raise LookupUnavailable(f"{self.name}: {last_error} after {MAX_ATTEMPTS} attempts")
+
+    def report(self):
+        return {"attempted":len(self.attempted), "resolved":self.stats["resolved"],
+                "misses":self.stats["misses"], "httpRequests":self.stats["httpRequests"],
+                "http429":self.stats["http429"], "exhaustedRequests":self.stats["exhaustedRequests"],
+                "httpErrors":self.stats["httpErrors"], "transportErrors":self.stats["transportErrors"],
+                "rateLimitedStreak":len(self.limited_keys), "disabled":self.disabled, "retryAt":self.retry_at}
 
 
 def valid_entry(entry):
@@ -105,45 +198,71 @@ def save_cache(path, cache):
         temporary.unlink(missing_ok=True)
 
 
-def resolve_links(source, cache_path, *, delay=.5, retry_fallbacks=False, session=None):
+def resolve_links(source, cache_path, *, delay=.35, retry_index=False, retry_fallbacks=False,
+                  providers=None, report_path=None):
     cache_path = Path(cache_path)
     cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+    previous = {}
+    if report_path and Path(report_path).exists():
+        previous = json.loads(Path(report_path).read_text(encoding="utf-8")).get("sources", {})
+    providers = providers if providers is not None else [
+        Provider(name, delay=delay, retry_at=previous.get(name, {}).get("retryAt", 0))
+        for name in ("openalex", "semantic_scholar")]
     rows = [row for row in iter_dict_rows(source) if needs_resolution(row)]
-    session = session or requests.Session()
-    session.headers["User-Agent"] = USER_AGENT
-    if os.environ.get("OPENALEX_API_KEY"):
-        session.headers["Authorization"] = "Bearer " + os.environ["OPENALEX_API_KEY"]
-    counts, seen = Counter(), set()
-    quota_exhausted = False
-    last_request = [0.0]
-    errors = 0
-    for i, row in enumerate(rows, 1):
+    eligible = {}
+    for row in rows:
         key = link_key(row)
-        cached = cache.get(key)
-        if key not in seen and (not valid_entry(cached) or (retry_fallbacks and cached["k"] != "doi")):
-            url = ""
-            if not quota_exhausted:
+        entry = cache.get(key)
+        if not valid_entry(entry) or (retry_index and entry["k"] == "index") or (retry_fallbacks and entry["k"] != "doi"):
+            eligible.setdefault(key, row)
+    processed, pending, resolved, errors = 0, 0, 0, 0
+    interrupted = False
+    try:
+        for key, row in eligible.items():
+            if not any(provider.available for provider in providers):
+                print("STOP: all DOI sources are deferred/rate-limited; remaining rows are pending, not completed misses", flush=True)
+                break
+            url, resolved_by, complete = "", "", True
+            for provider in providers:
                 try:
-                    url = lookup(session, row, max(.5, delay), last_request)
-                except QuotaExhausted as error:
-                    quota_exhausted = True
+                    url = provider.lookup(row)
+                except (LookupUnavailable, requests.RequestException, ValueError) as error:
+                    complete = False
                     errors += 1
-                    print(f"API LIMIT: {error}. Writing index-page fallbacks; retry with --retry-fallbacks when access is available.", flush=True)
-                except (requests.RequestException, ValueError) as error:
-                    errors += 1
-                    print(f"Lookup unavailable ({type(error).__name__}) for row {i}; preserving safe fallback", flush=True)
-            fallback = safe_url(row.get("source", ""))
-            cache[key] = {"u": url, "k": "doi"} if url else (
-                {"u": fallback, "k": "index"} if fallback else {"u": "", "k": "none"})
+                    print(f"UNAVAILABLE {provider.name}, row {processed + 1}: {error}", flush=True)
+                    continue
+                if url:
+                    resolved_by = provider.name
+                    break
+            if url:
+                cache[key] = {"u":url, "k":"doi", "r":resolved_by}
+                resolved += 1
+                print(f"MATCH {resolved_by}, row {processed + 1}: {url}", flush=True)
+            elif not valid_entry(cache.get(key)):
+                fallback = safe_url(row.get("source", ""))
+                cache[key] = {"u":fallback, "k":"index"} if fallback else {"u":"", "k":"none"}
+            if not url and not complete:
+                pending += 1
             save_cache(cache_path, cache)
-        seen.add(key)
-        counts[cache[key]["k"]] += 1
-        if i % 100 == 0 or i == len(rows):
-            print(f"Processed {i:,}/{len(rows):,}: DOI {counts['doi']:,}; index {counts['index']:,}; unmatched {counts['none']:,}", flush=True)
+            processed += 1
+            if processed % 100 == 0 or processed == len(eligible):
+                print(f"Processed {processed:,}/{len(eligible):,}; new DOIs {resolved:,}; pending {pending:,}", flush=True)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("INTERRUPTED: saving cache and pending counts", flush=True)
     save_cache(cache_path, cache)
-    report = {"rows": len(rows), "doi": counts["doi"], "index": counts["index"], "unmatched": counts["none"],
-              "cacheEntries": len(cache), "cacheBytes": cache_path.stat().st_size,
-              "quotaExhausted": quota_exhausted, "lookupErrors": errors}
+    unprocessed = len(eligible) - processed
+    counts = Counter(cache[link_key(row)]["k"] if valid_entry(cache.get(link_key(row))) else "none" for row in rows)
+    report = {"rows":len(rows), "eligible":len(eligible), "processed":processed,
+              "attempted":len(set().union(*(p.attempted for p in providers))), "resolved":resolved,
+              "doi":counts["doi"], "index":counts["index"], "unmatched":counts["none"],
+              "pending":pending + unprocessed, "unprocessed":unprocessed,
+              "complete":not (pending or unprocessed or interrupted), "interrupted":interrupted,
+              "cacheEntries":len(cache), "cacheBytes":cache_path.stat().st_size,
+              "lookupErrors":errors, "sources":{p.name:p.report() for p in providers},
+              "updatedAt":datetime.now(timezone.utc).isoformat()}
+    if report_path:
+        save_cache(Path(report_path), report)
     print("Resolution summary: " + json.dumps(report, sort_keys=True), flush=True)
     return report
 
@@ -152,10 +271,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=ROOT / "data/iacr_publications")
     parser.add_argument("--cache", type=Path, default=ROOT / "data/link_landing.json")
-    parser.add_argument("--delay", type=float, default=.5, help="minimum seconds between API calls (at least 0.5)")
-    parser.add_argument("--retry-fallbacks", action="store_true", help="retry cached index/unmatched entries, e.g. after quota resets")
+    parser.add_argument("--delay", type=float, default=.35, help="request pacing: minimum 0.35s OpenAlex, 0.6s Semantic Scholar")
+    parser.add_argument("--retry-index", action="store_true", help="retry cached index fallbacks; preserve existing DOI matches")
+    parser.add_argument("--retry-fallbacks", action="store_true", help="retry both index and unmatched entries (legacy flag)")
+    parser.add_argument("--report", type=Path, default=ROOT / "dist/link_resolution_report.json", help="resumable provider deadlines and per-source counts (ignored by Git)")
     args = parser.parse_args()
-    resolve_links(args.source, args.cache, delay=args.delay, retry_fallbacks=args.retry_fallbacks)
+    report = resolve_links(args.source, args.cache, delay=args.delay, retry_index=args.retry_index,
+                           retry_fallbacks=args.retry_fallbacks, report_path=args.report)
+    raise SystemExit(130 if report["interrupted"] else 0 if report["complete"] else 2)
 
 
 if __name__ == "__main__":

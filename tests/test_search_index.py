@@ -244,39 +244,142 @@ class LinkResolverTests(unittest.TestCase):
         for url in ["https://eprint.iacr.org/2024/001.pdf", "https://tches.iacr.org/article/download/1/2.pdf", "https://doi.org/10.1000/paper"]:
             self.assertFalse(resolver.needs_resolution({"url":url}))
 
-    def test_lookup_parameters_and_doi_acceptance(self):
-        session = Mock()
-        response = session.get.return_value
-        response.status_code = 200
-        response.json.return_value = {"results":[{"title":"My paper", "publication_year":2024, "doi":"10.1000/paper"}]}
-        with patch.object(resolver.time, "sleep"):
-            self.assertEqual(resolver.lookup(session, {"title":"My paper", "year":"2024"}, .5, [0]), "https://doi.org/10.1000/paper")
-        self.assertEqual(session.get.call_args.kwargs["params"],
-                         {"filter":"title.search:My paper", "per-page":5, "select":"doi,title,publication_year"})
+    @staticmethod
+    def response(status=200, body=None, headers=None):
+        return Mock(status_code=status, headers=headers or {}, json=Mock(return_value=body or {}))
 
-    def test_quota_fallback_resume_and_retry(self):
+    def provider(self, name, responses):
+        session = Mock(headers={})
+        if isinstance(responses, list):
+            session.get.side_effect = responses
+        else:
+            session.get.return_value = responses
+        return resolver.Provider(name, session=session)
+
+    def test_lookup_parameters_and_doi_acceptance(self):
+        hit = {"title":"My paper", "publication_year":2024, "doi":"10.1000/paper"}
+        p = self.provider("openalex", self.response(body={"results":[hit]}))
+        with patch.object(resolver.time, "sleep"):
+            self.assertEqual(p.lookup({"title":"My paper", "year":"2024"}), "https://doi.org/10.1000/paper")
+        self.assertEqual(p.session.get.call_args.kwargs["params"],
+                         {"filter":"title.search:My paper", "per-page":5, "select":"doi,title,publication_year", "mailto":resolver.CONTACT})
+        self.assertIn("mailto=" + resolver.CONTACT, p.session.headers["User-Agent"])
+        self.assertEqual(p.delay, .35)
+        self.assertEqual(p.report()["resolved"], 1)
+
+    def test_semantic_scholar_external_doi_and_isolated_auth(self):
+        hit = {"title":"My paper", "year":2024, "externalIds":{"DOI":"10.1000/paper"}}
+        p = self.provider("semantic_scholar", self.response(body={"data":[hit]}))
+        with patch.object(resolver.time, "sleep"), patch.dict("os.environ", {"OPENALEX_API_KEY":"openalex-only"}):
+            self.assertEqual(p.lookup({"title":"My paper", "year":"2024"}), "https://doi.org/10.1000/paper")
+        self.assertEqual(p.session.get.call_args.kwargs["params"],
+                         {"query":"My paper", "limit":5, "fields":"title,year,externalIds"})
+        self.assertNotIn("Authorization", p.session.get.call_args.kwargs["headers"])
+        self.assertEqual(p.delay, .6)
+
+    def test_one_429_retries_same_query_and_recovers(self):
+        p = self.provider("openalex", [self.response(429, {"dailyRemainingUsd":0}), self.response()])
+        row = {"title":"First", "year":"2024"}
+        with patch.object(resolver.time, "sleep") as sleep, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(p.lookup(row), "")
+        self.assertEqual(p.session.get.call_count, 2)
+        self.assertEqual(p.session.get.call_args_list[0], p.session.get.call_args_list[1])
+        self.assertIn(2, [call.args[0] for call in sleep.call_args_list])
+        self.assertEqual(p.report()["rateLimitedStreak"], 0)
+        self.assertFalse(p.disabled)
+
+    def test_backoff_and_eight_distinct_queries_before_cutoff(self):
+        p = self.provider("openalex", self.response(429))
+        with patch.object(resolver.time, "sleep") as sleep, contextlib.redirect_stdout(io.StringIO()):
+            for i in range(8):
+                with self.assertRaises(resolver.LookupUnavailable):
+                    p.lookup({"title":f"Paper {i}", "year":"2024"})
+                self.assertEqual(p.disabled, i == 7)
+        self.assertEqual(p.session.get.call_count, 48)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list if call.args[0] >= 2], [2,4,8,16,32] * 8)
+        self.assertEqual(p.report()["attempted"], 8)
+        self.assertEqual(p.report()["rateLimitedStreak"], 8)
+
+    def test_repeated_title_and_non_429_do_not_trip_cutoff(self):
+        p = self.provider("openalex", self.response(429))
+        row = {"title":"Same title", "year":"2024"}
+        with patch.object(resolver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(9):
+                with self.assertRaises(resolver.LookupUnavailable): p.lookup(row)
+        self.assertFalse(p.disabled)
+        self.assertEqual(p.report()["rateLimitedStreak"], 1)
+        p.session.get.return_value = self.response(404)
+        with self.assertRaises(resolver.LookupUnavailable): p.lookup(row)
+        self.assertEqual(p.report()["rateLimitedStreak"], 0)
+
+    def test_retry_after_seconds_dates_and_long_deferral(self):
+        with patch.object(resolver.time, "time", return_value=100):
+            self.assertEqual(resolver.retry_after(self.response(headers={"Retry-After":"12"})), 12)
+            self.assertEqual(resolver.retry_after(self.response(headers={"Retry-After":"Thu, 01 Jan 1970 00:02:00 GMT"})), 20)
+            p = self.provider("openalex", self.response(429, headers={"Retry-After":"3600"}))
+            with patch.object(resolver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(resolver.LookupUnavailable): p.lookup({"title":"First", "year":"2024"})
+            self.assertEqual(p.retry_at, 3700)
+            self.assertEqual(p.session.get.call_count, 1)
+            self.assertFalse(p.available)
+            self.assertFalse(p.disabled)
+        p = self.provider("openalex", [self.response(429, headers={"Retry-After":"3"}), self.response()])
+        with patch.object(resolver.time, "sleep") as sleep, contextlib.redirect_stdout(io.StringIO()):
+            p.lookup({"title":"First", "year":"2024"})
+        self.assertIn(3, [call.args[0] for call in sleep.call_args_list])
+
+    def test_retry_index_fallback_preserves_cache_and_uses_second_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "links.json"
-            rows = [{"title":"First", "year":"2024", "url":"./one.pdf", "source":"https://iacr.org/index.html"},
-                    {"title":"Second", "year":"2024", "url":"./two.pdf", "source":""}]
-            session = Mock(headers={})
-            response = session.get.return_value
-            response.status_code = 429
-            response.json.return_value = {"dailyRemainingUsd":0}
+            report_path = Path(temporary) / "report.json"
+            original = {"first|2024":{"u":"https://iacr.org/index.html", "k":"index"},
+                        "already|2024":{"u":"https://doi.org/10.1000/already", "k":"doi"},
+                        "unmatched|2024":{"u":"", "k":"none"}}
+            cache.write_text(json.dumps(original))
+            rows = [{"title":title, "year":"2024", "url":"./one.pdf", "source":"https://iacr.org/index.html"}
+                    for title in ["First", "Already", "Unmatched"]]
+            providers = [self.provider("openalex", self.response()), self.provider("semantic_scholar",
+                         self.response(body={"data":[{"title":"First", "year":2024, "externalIds":{"DOI":"10.1000/first"}}]}))]
             with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), patch.object(resolver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
-                report = resolver.resolve_links("unused", cache, session=session)
-            self.assertEqual((report["rows"], report["doi"], report["index"], report["unmatched"]), (2, 0, 1, 1))
-            self.assertTrue(report["quotaExhausted"])
-            self.assertEqual(session.get.call_count, 1)
-            self.assertIn("mailto=wangfangzhen23@mails.ucas.ac.cn", session.headers["User-Agent"])
-            with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), patch.object(resolver, "lookup") as lookup, contextlib.redirect_stdout(io.StringIO()):
-                resolver.resolve_links("unused", cache, session=session)
-                lookup.assert_not_called()
-            with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), patch.object(resolver, "lookup", return_value="https://doi.org/10.1000/paper") as lookup, contextlib.redirect_stdout(io.StringIO()):
-                report = resolver.resolve_links("unused", cache, session=session, retry_fallbacks=True, delay=0)
-                self.assertEqual(lookup.call_args.args[2], .5)
-            self.assertEqual(report["doi"], 2)
-            self.assertTrue(all(entry["k"] == "doi" for entry in json.loads(cache.read_text()).values()))
+                report = resolver.resolve_links("unused", cache, providers=providers, retry_index=True, report_path=report_path)
+            after = json.loads(cache.read_text())
+            self.assertEqual(after["already|2024"], original["already|2024"])
+            self.assertEqual(after["unmatched|2024"], original["unmatched|2024"])
+            self.assertEqual(after["first|2024"], {"u":"https://doi.org/10.1000/first", "k":"doi", "r":"semantic_scholar"})
+            self.assertEqual((report["attempted"],report["resolved"],report["pending"]), (1,1,0))
+            self.assertEqual(report["sources"]["openalex"]["resolved"], 0)
+            self.assertEqual(report["sources"]["semantic_scholar"]["resolved"], 1)
+            self.assertTrue(report["complete"])
+            self.assertEqual(json.loads(report_path.read_text()), report)
+
+    def test_both_sources_unavailable_leave_unprocessed_cache_pending(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "links.json"
+            report_path = Path(temporary) / "report.json"
+            rows = [{"title":str(i), "year":"2024", "url":"./one.pdf", "source":"https://iacr.org/index.html"} for i in range(10)]
+            original = {resolver.link_key(r):{"u":r["source"], "k":"index"} for r in rows}
+            cache.write_text(json.dumps(original))
+            providers = [self.provider(name, self.response(429)) for name in ["openalex","semantic_scholar"]]
+            with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), patch.object(resolver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+                report = resolver.resolve_links("unused", cache, providers=providers, retry_index=True, report_path=report_path)
+            self.assertEqual(json.loads(cache.read_text()), original)
+            self.assertEqual((report["processed"], report["unprocessed"], report["pending"]), (8,2,10))
+            self.assertFalse(report["complete"])
+            self.assertEqual(report["sources"]["openalex"]["attempted"], 8)
+            # A resumed run must honor persisted long Retry-After deadlines before any new request.
+            state = {"sources":{name:{"retryAt":1000} for name in ["openalex","semantic_scholar"]}}
+            report_path.write_text(json.dumps(state))
+            with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), patch.object(resolver.time, "time", return_value=100), contextlib.redirect_stdout(io.StringIO()):
+                report = resolver.resolve_links("unused", cache, retry_index=True, report_path=report_path)
+            self.assertEqual(report["attempted"], 0)
+            self.assertEqual(report["pending"], 10)
+
+    def test_token_overlap_and_arbitrary_latex_macros(self):
+        row = {"title":r"$\unknown{Secure}$ Multi Party Computation Protocols", "year":"2024"}
+        hit = {"title":"Protocols for Secure Multi Party Computation", "year":2024, "externalIds":{"DOI":"10.1000/reordered"}}
+        self.assertEqual(resolver.choose_doi(row, [hit]), "")  # Extra token falls below 0.85 Jaccard.
+        hit["title"] = "Protocols Secure Multi Party Computation"
+        self.assertEqual(resolver.choose_doi(row, [hit]), "https://doi.org/10.1000/reordered")
 
 
 class PageTests(unittest.TestCase):
@@ -306,6 +409,7 @@ class PageTests(unittest.TestCase):
         self.assertNotIn(".pdf", html.casefold())
         self.assertIn("opens the proceedings index page", html)
         self.assertIn("OpenAlex", html)
+        self.assertIn("Semantic Scholar", html)
         self.assertEqual((ROOT / "docs/.nojekyll").stat().st_size, 0)
 
     @unittest.skipUnless(shutil.which("node"), "Node is optional for JavaScript unit checks")

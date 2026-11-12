@@ -130,22 +130,44 @@ python3 tools/build_search_index.py
 ```
 
 The resolver stores title/year matches in `data/link_landing.json` (under
-1,000,000 bytes). It queries [OpenAlex](https://openalex.org/) for archival
-PDF links, accepting normalized title similarity ≥ 0.92 and publication years
-within ±1. Requests carry the project contact address and are spaced at least
-0.5 seconds apart. Confident matches use DOI landing URLs; other rows use their
+1,000,000 bytes). It queries [OpenAlex](https://openalex.org/), then
+[Semantic Scholar](https://www.semanticscholar.org/product/api) on a miss or
+temporary failure. Matching removes LaTeX macros and punctuation, and accepts
+title similarity ≥ 0.90 or token-set Jaccard similarity ≥ 0.85, with publication
+years within ±1. OpenAlex requests include the contact address in both the
+`mailto` query parameter and User-Agent, at least 0.35 seconds apart; Semantic
+Scholar requests are at least 0.6 seconds apart. Confident matches use DOI
+landing URLs and record their resolver in `r`; other rows use their
 `source` proceedings index, or an empty URL when no safe source exists. The
-current inputs have 2,775 unresolved PDF links (the 2,771 archive links counted
+current inputs have 2,775 PDF links requiring lookup (the 2,771 archive links counted
 on `www.iacr.org` or relative paths, plus four on other IACR hosts); six ePrint
 PDF URLs convert directly to abstract pages without a lookup.
 
-The cache is resumable and written after each lookup. OpenAlex returned HTTP
-429 with its shared anonymous daily budget exhausted during this repair, so
-the committed cache contains 2,775 index fallbacks and zero newly resolved
-DOIs. Existing DOI and OJS links remain usable. To retry fallbacks after quota
-resets, run `python3 tools/resolve_links.py --retry-fallbacks`, then rebuild.
-An existing `OPENALEX_API_KEY` environment variable is supported when available.
-Quota exhaustion stops API calls for that run while preserving safe fallbacks.
+The cache is resumable and written atomically after each row. To upgrade
+existing index fallbacks without losing DOI matches, run:
+
+```bash
+python3 tools/resolve_links.py --retry-index
+python3 tools/build_search_index.py
+```
+
+Each source retries a throttled request up to six total attempts, with delays
+of 2, 4, 8, 16 and 32 seconds, extended by `Retry-After` when present (seconds
+or HTTP date). A source stops for that run only after eight consecutive
+distinct queries are throttled; retrying one title cannot trip this threshold,
+and a non-429 response resets the streak. Server delays longer than 60 seconds
+defer that source until the specified deadline while the other source continues.
+The report persists these deadlines across restarts, so retrying cannot bypass
+a server-requested cooldown.
+
+`dist/link_resolution_report.json` (ignored by Git; override with `--report`)
+records attempted/resolved counts per source, HTTP requests and 429s, pending
+rows, and retry deadlines. Incomplete runs exit with status 2 and retain safe
+cache entries; interrupted runs save progress and exit 130. Pending lookups are
+never reported as completed misses. Retry with the same command after the
+recorded delay. The legacy `--retry-fallbacks` flag retries both index and
+unmatched entries. Existing `OPENALEX_API_KEY` and `SEMANTIC_SCHOLAR_API_KEY`
+environment variables are supported and kept separate between the services.
 
 The builder reads `data/papers_merged/` and `data/iacr_publications/` and writes
 `docs/data/<year>.json` plus a small `manifest.json`. It keeps one result per
