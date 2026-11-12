@@ -111,11 +111,14 @@ Offline regression checks: `python3 -B -m unittest discover -s tests -v`.
 
 ## Keyword search on GitHub Pages
 
-`docs/index.html` is a separate, responsive search page for the merged ePrint
-corpus. The root `index.html` remains the CryptoScope dashboard. Search runs
-in the browser with AND terms, quoted phrases, year/category filters, sorting,
-and shareable query URLs. Result titles open the original ePrint **abstract
-landing page**; no PDFs are hosted or downloaded by this page.
+`docs/index.html` is a separate, responsive search page for ePrint preprints
+and IACR conferences and journals: CRYPTO, EUROCRYPT, ASIACRYPT, PKC, TCC,
+TCHES, ToSC, JoC, CiC and RWC. The root `index.html` remains the CryptoScope
+dashboard. Search runs in the browser with AND terms, quoted phrases,
+year/category/source/venue filters, sorting, and shareable query URLs.
+ePrint titles open the original **abstract landing page**. Publication titles
+use their non-PDF URL or DOI, or remain plain text if neither is available.
+No PDFs are hosted or downloaded by this page.
 
 After refreshing the corpus, regenerate and commit the search metadata:
 
@@ -123,15 +126,33 @@ After refreshing the corpus, regenerate and commit the search metadata:
 python3 tools/build_search_index.py
 ```
 
-The builder reads `data/papers_merged/` and writes `docs/data/<year>.json`
-plus a small `manifest.json`. It deduplicates landing-page URLs, retains up
-to four authors, and reports source/deduplicated counts and UTF-8 byte sizes.
-The total JSON payload is limited to 6,000,000 bytes and each file to
-1,500,000 bytes. Abstract snippets start at 180 characters, fall back to 120,
-then are omitted if needed. The current 17,563-paper index needs the last
-fallback: 4,403,730 bytes, with titles, authors, keywords and categories
-searchable. Full abstracts are not fetched. Year files load in parallel on
-the first interaction; subsequent searches need no network connection.
+The builder reads `data/papers_merged/` and `data/iacr_publications/` and writes
+`docs/data/<year>.json` plus a small `manifest.json`. It keeps one result per
+normalized title (casefolded, LaTeX formatting removed, alphanumerics and
+collapsed spaces). ePrint wins as the canonical source; the most recent
+publication supplies a venue badge and an “also published at” label/link.
+For ties, journals take precedence. Duplicate publication title/venue/year
+records are collapsed, and duplicate titles across venues also become one
+result. Repeated ePrint titles use the newest ePrint year.
+
+The current inputs contain 17,563 ePrint rows and 5,943 publication rows;
+4,436 duplicates collapse to **19,070 searchable titles**: 17,556 ePrint,
+582 conference (including RWC talks), and 932 journal records. Those source
+counts describe canonical search results; ePrint entries may also carry an
+official publication link. The source dropdown selects the canonical source;
+the venue dropdown selects its displayed venue family. Categories apply only
+to ePrint records. URL parameters `q`, `year`, `cat`, `src`, and `venue` combine
+freely; `src` accepts `eprint`, `conference`, `journal`, or `all`.
+
+The JSON payload is limited to 7,000,000 bytes in total and 1,500,000 bytes per
+file. **No abstract snippets are generated, fetched, or searched**;
+`snippetLength` is always zero. Records contain compact title/author/year/
+category/keyword/link fields plus `s` (source), `v` (venue), and optional
+`al`/`au` (also-published label/link). PDF-only publication URLs and unsafe or
+relative links are excluded, using a DOI fallback where available. Year files
+load in parallel on the first interaction; subsequent searches need no
+network connection. The builder reports input/indexed source counts, dedupe
+reduction, per-year record counts, and UTF-8 byte sizes.
 
 To enable publishing in [GitHub's Pages settings](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site):
 

@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="description" content="Search IACR ePrint paper titles, authors, keywords and categories. A local search index, with links to the original abstract pages.">
-  <title>ePrint Paper Index — Search the cryptography corpus</title>
+  <meta name="description" content="Search IACR ePrint preprints, conference proceedings and journals by title, author, keyword, venue and source.">
+  <title>IACR Paper Index — Preprints, conferences and journals</title>
   <style>
     :root { color-scheme:light; --bg:#f6f5f0; --paper:#fffefa; --ink:#192c32; --muted:#566870; --line:#d8ded9; --accent:#176550; --wash:#e8efe9; --mark:#f8df89; --error:#9e3030; }
     * { box-sizing:border-box; }
@@ -35,7 +35,7 @@
     #query::placeholder { color:var(--muted); opacity:.9; }
     kbd { padding:0 7px; border:1px solid var(--line); border-radius:4px; color:var(--muted); font:13px/24px ui-monospace,monospace; }
     .hint { margin:10px 0 22px; color:var(--muted); font-size:12px; }
-    .filters { display:grid; grid-template-columns:1fr 1fr 2fr 1.4fr auto; gap:14px; align-items:end; }
+    .filters { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; align-items:end; }
     .filter label { display:block; margin-bottom:5px; color:var(--muted); font-size:11px; font-weight:750; letter-spacing:.04em; text-transform:uppercase; }
     select { width:100%; min-height:42px; padding:8px 28px 8px 10px; border:1px solid var(--line); border-radius:5px; background:var(--paper); color:var(--ink); font-size:13px; }
     select:disabled { cursor:wait; opacity:.7; }
@@ -55,7 +55,10 @@
     .paper-meta { margin:0; color:var(--accent); font-size:12px; font-weight:650; }
     .keywords { display:flex; gap:6px; flex-wrap:wrap; margin-top:12px; }
     .chip { padding:2px 8px; background:var(--wash); border-radius:4px; font-size:11px; }
-    .snippet { max-width:920px; margin:12px 0 0; color:var(--muted); font-size:13px; line-height:1.7; }
+    .badges { display:flex; flex-wrap:wrap; gap:7px; margin-top:10px; }
+    .venue-badge { padding:2px 8px; border:1px solid var(--accent); border-radius:4px; color:var(--accent); font-size:11px; font-weight:700; }
+    .source-chip { padding:3px 8px; border-radius:4px; background:var(--wash); color:var(--muted); font-size:11px; }
+    .also-published { margin:10px 0 0; font-size:12px; color:var(--accent); }
     mark { color:var(--ink); background:var(--mark); padding:0 .04em; border-radius:2px; }
     .state { padding:54px 12px 64px; text-align:center; }
     .state h2 { margin:0 0 10px; font:normal 29px/1.3 Georgia,"Times New Roman",serif; }
@@ -100,14 +103,14 @@
   <a class="skip-link" href="#search-area">Skip to search</a>
   <div class="shell">
     <header class="masthead">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">e</span> ePrint Paper Index</div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true">i</span> IACR Paper Index</div>
       <a class="repo-link" href="https://github.com/wang2000star/paper-pull" target="_blank" rel="noopener noreferrer">View repository ↗</a>
     </header>
     <main>
       <section class="hero" aria-labelledby="page-title">
         <p class="eyebrow">A field guide to cryptography research</p>
         <h1 id="page-title">Find the paper.<br>Follow the idea.</h1>
-        <p class="intro">Search across a decade of IACR ePrint research. Explore titles, authors, keywords and categories, then go straight to the original paper page.</p>
+        <p class="intro">IACR ePrint preprints + conferences &amp; journals, 2017–2026. Explore CRYPTO, EUROCRYPT, ASIACRYPT, PKC, TCC, TCHES, ToSC, JoC, CiC and RWC in one index.</p>
       </section>
       <section id="search-area" class="search-panel" aria-label="Search and filters">
         <label class="search-label" for="query">What are you researching?</label>
@@ -116,17 +119,19 @@
           <input id="query" type="search" placeholder="Try homomorphic encryption…" autocomplete="off" spellcheck="false" aria-describedby="search-hint" aria-controls="results">
           <kbd aria-hidden="true">/</kbd>
         </div>
-        <p id="search-hint" class="hint">Every word must match. Use quotes for a phrase, like “oblivious transfer”. Searches cover titles, authors, keywords and categories.</p>
+        <p id="search-hint" class="hint">Every word must match. Use quotes for a phrase, like “oblivious transfer”. Search titles, authors, keywords, categories and venues. Abstracts are not indexed.</p>
         <div class="filters">
           <div class="filter"><label for="year-from">From year</label><select id="year-from"></select></div>
           <div class="filter"><label for="year-to">To year</label><select id="year-to"></select></div>
-          <div class="filter filter-category"><label for="category">Category</label><select id="category" disabled><option value="">All categories</option></select></div>
+          <div class="filter filter-category"><label for="category">ePrint category</label><select id="category" disabled><option value="">All categories</option></select></div>
+          <div class="filter"><label for="source">Source</label><select id="source"><option value="all">All sources</option><option value="eprint">Preprints (ePrint)</option><option value="conference">Conferences</option><option value="journal">Journals</option></select></div>
+          <div class="filter"><label for="venue">Venue</label><select id="venue" disabled><option value="">All venues</option></select></div>
           <div class="filter filter-sort"><label for="sort">Sort by</label><select id="sort"><option value="year">Newest first</option><option value="title">Title A–Z</option></select></div>
           <button id="reset" class="quiet-button" type="button">Clear filters</button>
         </div>
       </section>
       <div class="results-bar">
-        <p id="result-count" role="status" aria-live="polite" aria-atomic="true">17,563 papers · ready to search</p>
+        <p id="result-count" role="status" aria-live="polite" aria-atomic="true">19,070 papers · ready to search</p>
         <span class="local-note">Search stays in your browser</span>
       </div>
       <section id="result-area" aria-label="Search results" aria-busy="false">
@@ -149,8 +154,8 @@
       <noscript><p>This search needs JavaScript enabled. The source CSV corpus is available in the repository.</p></noscript>
     </main>
     <footer>
-      <p><span id="corpus-summary">17,563 papers · 2017–2026</span><br>Metadata from IACR ePrint Archive (CC0), no PDFs hosted.</p>
-      <p>Built from <a href="https://github.com/wang2000star/paper-pull" target="_blank" rel="noopener noreferrer">paper-pull ↗</a><br>Titles link to the original ePrint abstract pages.</p>
+      <p><span id="corpus-summary">ePrint 17,556 · conference 582 · journal 932 · deduped total 19,070 · 2017–2026</span><br>Metadata from IACR ePrint (CC0) and IACR/Crossref · no PDFs hosted.</p>
+      <p>Built from <a href="https://github.com/wang2000star/paper-pull" target="_blank" rel="noopener noreferrer">paper-pull ↗</a><br>ePrint landing pages and publication links where available.</p>
     </footer>
   </div>
   <script>
@@ -160,9 +165,17 @@
       const terms = query => [...query.matchAll(/"([^"]*)"|([^\s"]+)/gu)]
         .map(match => fold((match[1] ?? match[2]).trim())).filter(Boolean);
       const category = paper => paper.c || "__uncategorized__";
-      const prepare = paper => ({ ...paper, searchText: fold([paper.t, paper.a, paper.k, paper.c, paper.s || ""].join(" ")) });
-      const matches = (paper, words, from, to, cat) => paper.y >= from && paper.y <= to &&
-        (!cat || category(paper) === cat) && words.every(word => paper.searchText.includes(word));
+      const venueFamily = paper => paper.v === "ePrint" ? "" : paper.v.replace(/\s+\d{4}$/u, "");
+      const prepare = paper => ({ ...paper, searchText: fold([paper.t, paper.a, paper.k, paper.c, paper.v, paper.al || ""].join(" ")) });
+      const matches = (paper, words, from, to, cat, source = "all", venue = "") => paper.y >= from && paper.y <= to &&
+        (!cat || (paper.s === "eprint" && category(paper) === cat)) &&
+        (source === "all" || paper.s === source) && (!venue || venueFamily(paper) === venue) &&
+        words.every(word => paper.searchText.includes(word));
+      const safeLink = value => {
+        if (!value || /\.pdf/i.test(value)) return false;
+        try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password; }
+        catch { return false; }
+      };
       const compare = mode => (a, b) => mode === "title"
         ? a.t.localeCompare(b.t, "en") || b.y - a.y || a.u.localeCompare(b.u)
         : b.y - a.y || a.t.localeCompare(b.t, "en") || a.u.localeCompare(b.u);
@@ -172,17 +185,19 @@
         const pattern = new RegExp([...new Set(words)].sort((a, b) => b.length - a.length).map(escape).join("|"), "giu");
         return [...text.matchAll(pattern)].map(match => [match.index, match.index + match[0].length]);
       };
-      return { terms, prepare, matches, compare, highlightRanges };
+      return { terms, prepare, matches, compare, highlightRanges, venueFamily, safeLink };
     })();
 
     (() => {
       const $ = id => document.getElementById(id);
       const input = $("query"), from = $("year-from"), to = $("year-to"), cat = $("category"), sort = $("sort");
+      const source = $("source"), venue = $("venue");
       const PAGE_SIZE = 50;
       let years = Array.from({ length:10 }, (_, i) => 2017 + i);
       let papers = [], filtered = [], phase = "idle", pending = null, limit = PAGE_SIZE, timer;
       const initial = new URLSearchParams(location.search);
       let desiredCategory = initial.get("cat") || "";
+      let desiredVenue = initial.get("venue") || "";
       const number = value => value.toLocaleString("en-US");
       const option = (value, text) => new Option(text, String(value));
       const element = (tag, className, text) => {
@@ -202,6 +217,7 @@
       populateYears(initialYear?.[1], initialYear ? (initialYear[2] || initialYear[1]) : undefined);
       input.value = initial.get("q") || "";
       sort.value = initial.get("sort") === "title" ? "title" : "year";
+      source.value = ["eprint", "conference", "journal"].includes(initial.get("src")) ? initial.get("src") : "all";
 
       function syncURL() {
         if (location.protocol === "file:") return;
@@ -211,6 +227,8 @@
           year:from.value === String(years[0]) && to.value === String(years[years.length - 1]) ? "" :
             from.value === to.value ? from.value : `${from.value}-${to.value}`,
           cat:cat.value || desiredCategory,
+          src:source.value === "all" ? "" : source.value,
+          venue:venue.value || desiredVenue,
           sort:sort.value === "title" ? "title" : ""
         };
         for (const [key, value] of Object.entries(values)) value ? url.searchParams.set(key, value) : url.searchParams.delete(key);
@@ -235,27 +253,38 @@
         if (phase === "loading") { showState("loading-state"); $("result-count").textContent = "Loading paper metadata…"; return; }
         if (phase === "error") { showState("error-state"); $("result-count").textContent = "Metadata unavailable"; return; }
         const words = SearchCore.terms(input.value);
-        filtered = papers.filter(paper => SearchCore.matches(paper, words, Number(from.value), Number(to.value), cat.value));
+        filtered = papers.filter(paper => SearchCore.matches(paper, words, Number(from.value), Number(to.value), cat.value, source.value, venue.value));
         filtered.sort(SearchCore.compare(sort.value));
         const visible = filtered.slice(0, limit);
         $("result-count").textContent = `Showing ${number(visible.length)} of ${number(filtered.length)} matches`;
         showState(filtered.length ? "" : "empty-state");
         const fragment = document.createDocumentFragment();
         for (const paper of visible) {
-          const card = element("li", "card"), heading = element("h2"), link = element("a", "paper-link");
-          link.href = paper.u; link.target = "_blank"; link.rel = "noopener noreferrer";
-          highlighted(link, paper.t, words);
-          link.append(element("span", "sr-only", " (opens in a new tab)"));
-          heading.append(link);
+          const card = element("li", "card"), heading = element("h2");
+          card.dataset.source = paper.s;
+          const title = element(paper.u ? "a" : "span", paper.u ? "paper-link" : "paper-title");
+          if (paper.u) { title.href = paper.u; title.target = "_blank"; title.rel = "noopener noreferrer"; }
+          highlighted(title, paper.t, words);
+          if (paper.u) title.append(element("span", "sr-only", " (opens in a new tab)"));
+          else title.tabIndex = -1;
+          heading.append(title);
           card.append(heading, element("p", "authors", paper.a || "Authors not listed"),
-            element("p", "paper-meta", `${paper.y} · ${paper.c || "Uncategorized"}`));
+            element("p", "paper-meta", `${paper.y}${paper.c ? ` · ${paper.c}` : ""}`));
+          const badges = element("div", "badges");
+          badges.append(element("span", "venue-badge", paper.v), element("span", "source-chip", paper.s === "eprint" ? "preprint" : paper.s));
+          card.append(badges);
           const keywords = paper.k.split(/[;；]/u).map(word => word.trim()).filter(Boolean);
           if (keywords.length) {
             const chips = element("div", "keywords");
             for (const keyword of keywords) { const chip = element("span", "chip"); highlighted(chip, keyword, words); chips.append(chip); }
             card.append(chips);
           }
-          if (paper.s) { const snippet = element("p", "snippet"); highlighted(snippet, paper.s, words); card.append(snippet); }
+          if (paper.al) {
+            const line = element("p", "also-published");
+            const also = element(paper.au ? "a" : "span", "", `正式版 / ${paper.al}`);
+            if (paper.au) { also.href = paper.au; also.target = "_blank"; also.rel = "noopener noreferrer"; }
+            line.append(also); card.append(line);
+          }
           fragment.append(card);
         }
         $("results").append(fragment);
@@ -276,7 +305,7 @@
           try {
             if (location.protocol === "file:") throw new Error("file protocol");
             const manifest = await json("data/manifest.json");
-            if (manifest.version !== 1 || !Array.isArray(manifest.files) || !manifest.files.length) throw new Error("Invalid manifest");
+            if (manifest.version !== 2 || manifest.snippetLength !== 0 || !Array.isArray(manifest.files) || !manifest.files.length) throw new Error("Invalid manifest");
             const shards = await Promise.all(manifest.files.map(async shard => {
               if (!/^\d{4}\.json$/.test(shard.file)) throw new Error("Invalid shard path");
               const rows = await json(`data/${shard.file}`);
@@ -286,19 +315,25 @@
             const rows = shards.flat();
             if (rows.length !== manifest.count || !rows.every(paper =>
               typeof paper.t === "string" && typeof paper.a === "string" && typeof paper.k === "string" &&
-              typeof paper.c === "string" && Number.isInteger(paper.y) && /^https:\/\/eprint\.iacr\.org\/\d{4}\/\d+$/.test(paper.u) &&
-              (paper.s === undefined || typeof paper.s === "string"))) throw new Error("Invalid paper metadata");
+              typeof paper.c === "string" && Number.isInteger(paper.y) && typeof paper.u === "string" &&
+              ["eprint", "conference", "journal"].includes(paper.s) && typeof paper.v === "string" &&
+              (!paper.u || SearchCore.safeLink(paper.u)) && (!paper.au || SearchCore.safeLink(paper.au)) &&
+              (paper.s !== "eprint" || /^https:\/\/eprint\.iacr\.org\/\d{4}\/\d+$/.test(paper.u)))) throw new Error("Invalid paper metadata");
             papers = rows.map(SearchCore.prepare);
             const oldFrom = from.value, oldTo = to.value;
             years = [...new Set(rows.map(paper => paper.y))].sort((a, b) => a - b);
             populateYears(oldFrom, oldTo);
-            const categories = [...new Set(rows.map(paper => paper.c || "__uncategorized__"))];
+            const categories = [...new Set(rows.filter(paper => paper.s === "eprint").map(paper => paper.c || "__uncategorized__"))];
             if (desiredCategory && !categories.includes(desiredCategory)) categories.push(desiredCategory);
             categories.sort((a, b) => a.localeCompare(b, "en"));
             cat.replaceChildren(option("", "All categories"), ...categories.map(value => option(value, value === "__uncategorized__" ? "Uncategorized" : value)));
             cat.value = desiredCategory; cat.disabled = false;
-            $("corpus-summary").textContent = `${number(papers.length)} papers · ${years[0]}–${years[years.length - 1]}`;
-            if (manifest.snippetLength) $("search-hint").textContent += " Abstract snippets are also searchable.";
+            const venues = [...new Set(rows.map(SearchCore.venueFamily).filter(Boolean))];
+            if (desiredVenue && !venues.includes(desiredVenue)) venues.push(desiredVenue);
+            venues.sort((a, b) => a.localeCompare(b, "en"));
+            venue.replaceChildren(option("", "All venues"), ...venues.map(value => option(value, value)));
+            venue.value = desiredVenue; venue.disabled = false;
+            $("corpus-summary").textContent = `ePrint ${number(manifest.counts.eprint)} · conference ${number(manifest.counts.conference)} · journal ${number(manifest.counts.journal)} · deduped total ${number(papers.length)} · ${years[0]}–${years[years.length - 1]}`;
             phase = "ready"; syncURL(); render();
           } catch (error) {
             phase = "error";
@@ -316,14 +351,17 @@
       }
       function clear() {
         input.value = ""; desiredCategory = ""; cat.value = ""; sort.value = "year";
+        source.value = "all"; desiredVenue = ""; venue.value = "";
         populateYears(years[0], years[years.length - 1]); search(true); input.focus();
       }
       input.addEventListener("focus", loadData);
       input.addEventListener("input", () => search());
       from.addEventListener("change", () => { if (Number(from.value) > Number(to.value)) to.value = from.value; search(true); });
       to.addEventListener("change", () => { if (Number(to.value) < Number(from.value)) from.value = to.value; search(true); });
-      for (const select of [from, to, sort]) select.addEventListener("focus", loadData);
+      for (const select of [from, to, sort, source]) select.addEventListener("focus", loadData);
       cat.addEventListener("change", () => { desiredCategory = cat.value; search(true); });
+      source.addEventListener("change", () => search(true));
+      venue.addEventListener("change", () => { desiredVenue = venue.value; search(true); });
       sort.addEventListener("change", () => search(true));
       for (const id of ["reset", "clear-empty"]) $(id).addEventListener("click", clear);
       $("browse").addEventListener("click", () => search(true));
@@ -331,14 +369,14 @@
       document.querySelectorAll("[data-query]").forEach(button => button.addEventListener("click", () => {
         input.value = button.dataset.query; search(true); input.focus();
       }));
-      $("show-more").addEventListener("click", () => { const previous = limit; limit += PAGE_SIZE; render(); $("results").children[previous]?.querySelector("a").focus({ preventScroll:true }); });
+      $("show-more").addEventListener("click", () => { const previous = limit; limit += PAGE_SIZE; render(); $("results").children[previous]?.querySelector(".paper-link, .paper-title")?.focus({ preventScroll:true }); });
       document.addEventListener("keydown", event => {
         if (event.key === "/" && !event.ctrlKey && !event.metaKey && !event.altKey &&
             !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) && !document.activeElement.isContentEditable) {
           event.preventDefault(); input.focus();
         }
       });
-      if (["q", "year", "cat", "sort"].some(key => initial.has(key))) loadData();
+      if (["q", "year", "cat", "sort", "src", "venue"].some(key => initial.has(key))) loadData();
       else render();
     })();
   </script>
