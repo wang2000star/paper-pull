@@ -4,3 +4,4 @@ __pycache__/
 failed_ids.txt
 oai_state*.txt
 .DS_Store
+dist/

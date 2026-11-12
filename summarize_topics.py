@@ -4,9 +4,10 @@
 Direction labels are transparent high-precision keyword rules, intended as a
 reviewable first-pass taxonomy rather than a substitute for expert screening.
 """
-import csv, re, unicodedata
+import argparse, csv, re, unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
+from tools.shards import iter_dict_rows, write_shards
 
 YEARS = range(2022, 2027)
 RULES = [
@@ -45,15 +46,21 @@ def norm_title(s):
 def read_csv(path):
     p = Path(path)
     if not p.exists(): return []
-    with p.open(encoding="utf-8-sig", newline="") as f: return list(csv.DictReader(f))
+    return list(iter_dict_rows(p))
 
 def eprint_year(row):
     m = re.search(r"eprint\.iacr\.org/(\d{4})/", row.get("PDF链接", ""))
     return m.group(1) if m else ""
 
 def main():
-    eprints = read_csv("papers_5y.csv")
-    venue = read_csv("iacr_publications.csv")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--eprints", default="data/papers_5y", help="ePrint shard directory or flat CSV")
+    ap.add_argument("--publications", default="data/iacr_publications", help="venue shard directory or flat CSV")
+    ap.add_argument("--out-dir", default="data/papers_classified", help="classified year-shard directory")
+    ap.add_argument("--reports-dir", default=".", help="destination for the small RWC and ranking CSVs")
+    args = ap.parse_args()
+    eprints = read_csv(args.eprints)
+    venue = read_csv(args.publications)
     papers, rwc_talks = {}, []
     for r in eprints:
         title = r.get("标题", "").strip()
@@ -97,15 +104,16 @@ def main():
     ranked.sort(key=lambda r: (-r["total_2022_2026"], r["research_direction"]))
     for p in tagged:
         p["hot_topic_directions"] = "; ".join(t for t in p["directions"].split("; ") if t in hot)
-    with open("papers_classified.csv", "w", newline="", encoding="utf-8-sig") as f:
-        cols = ["title", "year", "authors", "venues", "directions", "hot_topic_directions", "abstract", "keywords", "eprint_url", "venue_url"]
-        w=csv.DictWriter(f,fieldnames=cols); w.writeheader(); w.writerows(sorted(tagged,key=lambda p:(p["year"],p["title"].casefold())))
-    with open("rwc_program.csv", "w", newline="", encoding="utf-8-sig") as f:
+    cols = ["title", "year", "authors", "venues", "directions", "hot_topic_directions", "abstract", "keywords", "eprint_url", "venue_url"]
+    write_shards(args.out_dir, cols, sorted(tagged,key=lambda p:(p["year"],p["title"].casefold())))
+    reports = Path(args.reports_dir)
+    reports.mkdir(parents=True, exist_ok=True)
+    with (reports / "rwc_program.csv").open("w", newline="", encoding="utf-8-sig") as f:
         cols = ["title", "authors", "year", "url", "source"]
         w=csv.DictWriter(f,fieldnames=cols); w.writeheader()
         for r in sorted(rwc_talks, key=lambda x:(x.get("year", ""), x.get("title", "").casefold())):
             w.writerow({k:r.get(k, "") for k in cols})
-    with open("topics_ranked.csv", "w", newline="", encoding="utf-8-sig") as f:
+    with (reports / "topics_ranked.csv").open("w", newline="", encoding="utf-8-sig") as f:
         cols = ["rank", "research_direction", *map(str, YEARS), "total_2022_2026", "hot_years_gt_10", "hot_topic"]
         w=csv.DictWriter(f,fieldnames=cols); w.writeheader()
         for i,r in enumerate(ranked,1): w.writerow({"rank":i,**r})

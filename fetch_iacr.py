@@ -14,6 +14,7 @@ import argparse, csv, re, time
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
+from tools.shards import append_rows, iter_dict_rows
 BASE = "https://eprint.iacr.org"
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -157,15 +158,16 @@ def parse_pdf(path):
 # ---------- 断点续传与写入 ----------
 def load_done(out_csv):
     done = set()
-    if Path(out_csv).exists():
-        with open(out_csv, newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                m = re.search(r"/(\d{4}/\d+)\.pdf", row.get("PDF链接", ""))
-                if m:
-                    done.add(m.group(1))
+    path = Path(out_csv)
+    if path.exists() and (not path.is_dir() or any(path.glob("*.csv"))):
+        for row in iter_dict_rows(path):
+            m = re.search(r"/(\d{4}/\d+)\.pdf", row.get("PDF链接", ""))
+            if m:
+                done.add(m.group(1))
     return done
 def append_row(out_csv, row):
-    new_file = not Path(out_csv).exists()
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    new_file = not Path(out_csv).exists() or Path(out_csv).stat().st_size == 0
     with open(out_csv, "a", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=CSV_HEADER)
         if new_file:
@@ -176,7 +178,9 @@ def main():
     ap.add_argument("ids", nargs="*", help="论文ID，如 2026/1385 或 2026/1300-2026/1400")
     ap.add_argument("--file", help="从文本文件读取ID（每行一个）")
     ap.add_argument("--latest", type=int, metavar="N", help="抓取首页最新N篇")
-    ap.add_argument("--out", default="papers.csv", help="输出CSV路径")
+    output = ap.add_mutually_exclusive_group()
+    output.add_argument("--data-dir", default="data/papers", help="按年份追加的目录（默认 data/papers）")
+    output.add_argument("--out", help="兼容旧流程：输出单个CSV，替代 --data-dir")
     ap.add_argument("--mode", choices=["html", "pdf"], default="html",
                     help="html=只解析落地页(默认，不下载PDF)；pdf=下载PDF解析后删除")
     ap.add_argument("--pdf-dir", default="papers_tmp", help="PDF临时目录")
@@ -195,7 +199,8 @@ def main():
     if not tokens:
         ap.error("请指定论文ID / --file / --latest 至少一项")
     ids = expand_ids(tokens)
-    done = load_done(args.out)
+    destination = args.out or args.data_dir
+    done = load_done(destination)
     pdf_dir = Path(args.pdf_dir)
     if args.mode == "pdf":
         pdf_dir.mkdir(exist_ok=True)
@@ -223,7 +228,10 @@ def main():
             miss += 1
             print("SKIP(404 不存在)")
         elif row and row.get("标题"):
-            append_row(args.out, row)
+            if args.out:
+                append_row(args.out, row)
+            else:
+                append_rows(args.data_dir, CSV_HEADER, [row])
             done.add(pid)
             ok += 1
             print(f"OK  {row['标题'][:60]}")
@@ -244,7 +252,7 @@ def main():
     if fail_fh:
         fail_fh.close()
     print(f"\n完成：成功 {ok}，跳过(已存在) {skip}，404不存在 {miss}，失败 {fail}"
-          f"，当前请求间隔 {delay:.1f}s\n结果写入 {args.out}"
+          f"，当前请求间隔 {delay:.1f}s\n结果写入 {destination}"
           + (f"\n失败ID已记录到 {args.fail_log}" if fail else ""))
 if __name__ == "__main__":
     main()

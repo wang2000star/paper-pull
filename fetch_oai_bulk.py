@@ -18,6 +18,7 @@ import argparse, csv, json, re, time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import requests
+from tools.shards import append_rows, iter_dict_rows, write_shards, year_of
 
 BASE = "https://eprint.iacr.org"
 OAI = BASE + "/oai"
@@ -82,30 +83,67 @@ def parse_page(root):
 
 def main():
     ap = argparse.ArgumentParser(description="ePrint OAI-PMH 批量元数据收割")
-    ap.add_argument("--from", dest="frm", default="2017-01-01", help="起始日期 YYYY-MM-DD")
+    ap.add_argument("--from", dest="frm", help="OAI修改日期起点，默认2017-01-01（--year时默认该年元旦）")
     ap.add_argument("--until", dest="until", default=time.strftime("%Y-%m-%d"), help="结束日期 YYYY-MM-DD")
-    ap.add_argument("--out", default="papers_bulk.csv", help="输出CSV")
-    ap.add_argument("--state", default="oai_state.txt", help="断点(resumptionToken)文件")
+    output = ap.add_mutually_exclusive_group()
+    output.add_argument("--out-dir", default="data/papers_bulk_10y", help="按年份输出目录（默认 data/papers_bulk_10y）")
+    output.add_argument("--out", help="兼容旧流程：输出单个CSV，替代 --out-dir")
+    ap.add_argument("--year", type=int, help="只收录此ePrint年份；--restart只清空此年份的分片")
+    ap.add_argument("--state", help="断点文件，默认输出路径旁的 oai_state*.txt；与查询及输出绑定")
     ap.add_argument("--delay", type=float, default=1.5, help="每页请求间隔秒数")
     ap.add_argument("--max-delay", type=float, default=60.0, help="限流退避上限秒数")
     ap.add_argument("--restart", action="store_true", help="忽略断点，从头收割")
     args = ap.parse_args()
+    if args.year is not None and not 1000 <= args.year <= 9999:
+        ap.error("--year must have four digits")
+    args.frm = args.frm or (f"{args.year}-01-01" if args.year else "2017-01-01")
+    destination = Path(args.out or args.out_dir)
+    state = Path(args.state) if args.state else destination.parent / (
+        f"oai_state_{destination.stem}" + (f"_{args.year}" if args.year else "") + ".txt")
+    query = {"from": args.frm, "until": args.until, "year": args.year,
+             "output": str(destination.resolve())}
 
-    state = Path(args.state)
     session = requests.Session()
     token = ""
     if state.exists() and not args.restart:
-        token = state.read_text(encoding="utf-8").strip()
+        try:
+            saved = json.loads(state.read_text(encoding="utf-8"))
+        except ValueError:
+            ap.error("旧断点缺少查询/输出信息；请使用 --restart 或选择新的 --state")
+        if not isinstance(saved, dict) or saved.get("query") != query:
+            ap.error("断点的查询/输出与当前命令不匹配；请使用 --restart 或选择新的 --state")
+        token = saved.get("token", "")
         if token:
             print(f"从断点继续：token={token[:40]}...")
 
-    new_file = not Path(args.out).exists() or args.restart
-    if args.restart and Path(args.out).exists():
-        Path(args.out).unlink()
-    fh = open(args.out, "a", newline="", encoding="utf-8-sig")
-    writer = csv.DictWriter(fh, fieldnames=CSV_HEADER)
-    if new_file:
-        writer.writeheader()
+    if args.restart:
+        if args.out:
+            if destination.exists():
+                destination.unlink()
+        elif destination.exists():
+            for path in destination.glob("*.csv"):
+                if (args.year is not None and path.stem == str(args.year)) or (
+                        args.year is None and re.fullmatch(r"(?:[0-9]{4}|_unknown)\.csv", path.name)):
+                    path.unlink()
+        if state.exists():
+            state.unlink()
+    seen = set()
+    if destination.exists() and (args.out or any(destination.glob("*.csv"))):
+        seen = {row["PDF链接"] for row in iter_dict_rows(destination)}
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not args.out:
+        destination.mkdir(parents=True, exist_ok=True)
+
+    def save_rows(rows):
+        if args.out:
+            new_file = not destination.exists() or destination.stat().st_size == 0
+            with destination.open("a", newline="", encoding="utf-8-sig") as stream:
+                writer = csv.DictWriter(stream, fieldnames=CSV_HEADER)
+                if new_file:
+                    writer.writeheader()
+                writer.writerows(rows)
+        else:
+            append_rows(destination, CSV_HEADER, rows)
 
     page = done = total = 0
     while True:
@@ -115,14 +153,20 @@ def main():
         root = get(session, params, args.delay, args.max_delay)
         err = root.find(".//oai:error", NS)
         if err is not None:
-            print(f"OAI 错误：{err.get('code')} {err.text}")
-            break
+            if err.get("code") == "noRecordsMatch":
+                if state.exists():
+                    state.unlink()
+                break
+            raise RuntimeError(f"OAI 错误：{err.get('code')} {err.text}")
         rows, token = parse_page(root)
+        selected = []
         for row in rows:
-            if row["标题"]:
-                writer.writerow(row)
+            if (row["标题"] and row["PDF链接"] not in seen
+                    and (args.year is None or year_of(row) == str(args.year))):
+                selected.append(row)
+                seen.add(row["PDF链接"])
                 done += 1
-        fh.flush()
+        save_rows(selected)
         page += 1
         size = root.find(".//oai:resumptionToken", NS)
         total = (size.get("completeListSize") if size is not None and size.get("completeListSize")
@@ -133,11 +177,19 @@ def main():
             if state.exists():
                 state.unlink()
             break
-        state.write_text(token, encoding="utf-8")
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"query": query, "token": token}), encoding="utf-8")
         time.sleep(args.delay)
 
-    fh.close()
-    print(f"\n完成：共 {done} 条记录（{page} 页）→ {args.out}")
+    if args.out:
+        if not destination.exists():
+            save_rows([])
+    elif args.year is not None:
+        if not (destination / f"{args.year}.csv").exists():
+            write_shards(destination, CSV_HEADER, [], years=[args.year])
+    elif not any(destination.glob("*.csv")):
+        write_shards(destination, CSV_HEADER, [])
+    print(f"\n完成：共 {done} 条记录（{page} 页）→ {destination}")
 
 if __name__ == "__main__":
     main()

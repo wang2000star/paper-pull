@@ -4,19 +4,21 @@
 merge_papers.py —— 合并 ePrint 元数据源，产出指定年份范围的数据集
 
 数据来源：
-  papers_bulk.csv  OAI-PMH 官方批量收割（标题/作者/摘要/分类，速度快，无关键词）
-  papers.csv       fetch_iacr.py 逐篇抓取落地页（含关键词，速度慢，受 Cloudflare 限流）
+  data/papers_bulk_10y/  OAI-PMH 官方批量收割
+  data/papers_5y/、data/papers/  历史关键词和新增逐篇抓取结果
 
 规则：
   标题/作者/摘要/分类 → 优先 OAI 批量数据，缺失时回退逐篇抓取数据
   关键词             → 仅逐篇抓取提供，随抓取进度推进而逐步补齐（未抓到的为空）
 
 可反复运行：抓取有新进展后重新执行本脚本即可刷新输出。
-用法：python merge_papers.py [--bulk papers_bulk_10y.csv] [--crawl papers_5y.csv]
-      [--out papers_10y.csv] [--start-year 2017] [--end-year 2026]
+用法：python merge_papers.py [--year 2026] [--bulk data/papers_bulk_10y]
+      [--crawl data/papers_5y data/papers] [--out-dir data/papers_10y]
+      [--out-5y-dir data/papers_5y] [--start-year 2017] [--end-year 2026]
 """
 import argparse, csv, re
 from pathlib import Path
+from tools.shards import iter_dict_rows, write_shards
 
 HEADER = ["标题", "作者", "摘要", "关键词", "PDF链接", "分类"]
 
@@ -27,67 +29,91 @@ def pid_of(row):
 def load(path):
     d = {}
     p = Path(path)
-    if not p.exists():
+    if not p.exists() or (p.is_dir() and not any(p.glob("*.csv"))):
         print(f"提示：{path} 不存在，已跳过")
         return d
-    with open(p, newline="", encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            pid = pid_of(r)
-            if pid and pid not in d:   # 首次出现优先，天然去重
-                d[pid] = r
+    for r in iter_dict_rows(p):
+        pid = pid_of(r)
+        if pid and pid not in d:   # 首次出现优先，天然去重
+            d[pid] = r
     return d
 
 def main():
     ap = argparse.ArgumentParser(description="合并OAI批量数据与逐篇抓取数据")
-    ap.add_argument("--bulk", default="papers_bulk_10y.csv")
-    ap.add_argument("--crawl", default="papers_5y.csv")
-    ap.add_argument("--out", default="papers_10y.csv")
+    ap.add_argument("--bulk", default="data/papers_bulk_10y", help="OAI目录或旧CSV")
+    ap.add_argument("--crawl", nargs="+", default=["data/papers_5y", "data/papers"],
+                    help="关键词目录或旧CSV，后面的源优先")
+    output = ap.add_mutually_exclusive_group()
+    output.add_argument("--out-dir", default="data/papers_10y", help="十年合并输出目录")
+    output.add_argument("--out", help="兼容旧流程的十年单CSV输出")
+    ap.add_argument("--out-5y-dir", default="data/papers_5y", help="近五年合并输出目录")
+    ap.add_argument("--five-year-start", type=int, default=2022, help="近五年窗口起点（默认2022）")
+    ap.add_argument("--year", type=int, help="只刷新此年份，保留其他年份分片")
     ap.add_argument("--missing", default="missing_ids.txt")
     ap.add_argument("--start-year", type=int, default=2017)
     ap.add_argument("--end-year", type=int, default=2026)
     args = ap.parse_args()
+    if not 1000 <= args.start_year <= args.end_year <= 9999:
+        ap.error("--start-year/--end-year must be ordered four-digit years")
+    if args.year is not None and not args.start_year <= args.year <= args.end_year:
+        ap.error("--year must be inside --start-year/--end-year")
 
-    bulk, crawl = load(args.bulk), load(args.crawl)
+    bulk, crawl = load(args.bulk), {}
+    for source in args.crawl:
+        crawl.update(load(source))
     print(f"载入：OAI批量 {len(bulk)} 篇，逐篇抓取 {len(crawl)} 篇")
 
     # Use the observed union of paper IDs; do not rely on manually maintained
     # per-year ID ceilings, which silently dropped newer and older records.
     merged = {**crawl, **bulk}
     ids = sorted((pid for pid in merged
-                  if args.start_year <= int(pid.split("/")[0]) <= args.end_year),
+                  if args.start_year <= int(pid.split("/")[0]) <= args.end_year
+                  and (args.year is None or int(pid.split("/")[0]) == args.year)),
                  key=lambda pid: (int(pid.split("/")[0]), int(pid.split("/")[1])))
 
     stat = {"总ID": 0, "双源": 0, "仅OAI": 0, "仅抓取": 0, "关键词已填": 0, "缺失": 0}
     per_year, missing = {}, []
-    with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=HEADER, lineterminator="\n")
-        w.writeheader()
-        for pid in ids:
-            y = pid.split("/")[0]
-            stat["总ID"] += 1
-            b, c = bulk.get(pid), crawl.get(pid)
-            if b and c: stat["双源"] += 1
-            elif b:     stat["仅OAI"] += 1
-            else:       stat["仅抓取"] += 1
+    output_rows = []
+    for pid in ids:
+        y = pid.split("/")[0]
+        stat["总ID"] += 1
+        b, c = bulk.get(pid), crawl.get(pid)
+        if b and c: stat["双源"] += 1
+        elif b:     stat["仅OAI"] += 1
+        else:       stat["仅抓取"] += 1
 
-            def pick(key, primary=b, fallback=c):
-                if primary and (primary.get(key) or "").strip():
-                    return primary[key].strip()
-                return (fallback.get(key, "").strip() if fallback else "")
+        def pick(key, primary=b, fallback=c):
+            if primary and (primary.get(key) or "").strip():
+                return primary[key].strip()
+            return (fallback.get(key, "").strip() if fallback else "")
 
-            kw = (c.get("关键词", "").strip() if c else "")
-            if kw: stat["关键词已填"] += 1
-            w.writerow({
-                "标题": pick("标题"),
-                "作者": pick("作者"),
-                "摘要": pick("摘要"),
-                "关键词": kw,
-                "PDF链接": f"https://eprint.iacr.org/{pid}.pdf",
-                "分类": pick("分类"),
-            })
-            per_year[y] = per_year.get(y, 0) + 1
+        kw = (c.get("关键词", "").strip() if c else "")
+        if kw: stat["关键词已填"] += 1
+        output_rows.append({
+            "标题": pick("标题"),
+            "作者": pick("作者"),
+            "摘要": pick("摘要"),
+            "关键词": kw,
+            "PDF链接": f"https://eprint.iacr.org/{pid}.pdf",
+            "分类": pick("分类"),
+        })
+        per_year[y] = per_year.get(y, 0) + 1
 
-    print(f"输出：{args.out}（{sum(per_year.values())} 篇）")
+    years = [args.year] if args.year is not None else range(args.start_year, args.end_year + 1)
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=HEADER, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(output_rows)
+    else:
+        write_shards(args.out_dir, HEADER, output_rows, years=years)
+    recent_years = [y for y in years if y >= args.five_year_start]
+    if recent_years:
+        write_shards(args.out_5y_dir, HEADER,
+                     (r for r in output_rows if int(pid_of(r).split("/")[0]) >= args.five_year_start),
+                     years=recent_years)
+    print(f"输出：{args.out or args.out_dir}、{args.out_5y_dir}（{sum(per_year.values())} 篇）")
     for y in sorted(per_year):
         print(f"  {y}: {per_year[y]:>5} 篇")
     print(f"合并统计：双源 {stat['双源']}，仅OAI {stat['仅OAI']}，仅抓取 {stat['仅抓取']}，"

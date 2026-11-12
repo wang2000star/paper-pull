@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Build the self-contained browser dashboard from the collected CSV files."""
-import csv
+import argparse
 import json
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
+from tools.shards import iter_dict_rows
 
 YEARS = [str(y) for y in range(2022, 2027)]
 VENUES = ["ASIACRYPT", "CiC", "CRYPTO", "EUROCRYPT", "JoC", "PKC", "RWC", "TCC", "TCHES", "ToSC"]
@@ -14,14 +15,20 @@ COLORS = ["#4f46e5", "#0891b2", "#e11d48", "#ca8a04", "#7c3aed", "#059669", "#ea
 
 
 def read_csv(path):
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        return list(csv.DictReader(f))
+    return list(iter_dict_rows(path))
 
 
 def main():
-    papers = read_csv("papers_classified.csv")
-    ranked = read_csv("topics_ranked.csv")
-    outlets = read_csv("iacr_publications.csv")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--papers", default="data/papers_classified", help="classified shard directory or flat CSV")
+    ap.add_argument("--ranked", default="topics_ranked.csv", help="ranked topics CSV")
+    ap.add_argument("--publications", default="data/iacr_publications", help="venue shard directory or flat CSV")
+    ap.add_argument("--template", default="dashboard_template.html")
+    ap.add_argument("--out", default="index.html")
+    args = ap.parse_args()
+    papers = read_csv(args.papers)
+    ranked = read_csv(args.ranked)
+    outlets = read_csv(args.publications)
     topics = []
     for row in ranked:
         topics.append({
@@ -81,11 +88,12 @@ def main():
         "outletTopics": {v: dict(outlet_topics[v]) for v in VENUES if v != "RWC"},
         "samples": dict(paper_samples),
     }
-    template = Path("dashboard_template.html").read_text(encoding="utf-8")
+    template = Path(args.template).read_text(encoding="utf-8")
     # Prevent embedded data from terminating the JSON script element.
     encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-    Path("index.html").write_text(template.replace("__DASHBOARD_DATA__", encoded), encoding="utf-8")
-    print(f"Built index.html: {len(papers):,} unique records, {len(topics)} directions, {len(outlets):,} venue/program records")
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(template.replace("__DASHBOARD_DATA__", encoded), encoding="utf-8")
+    print(f"Built {args.out}: {len(papers):,} unique records, {len(topics)} directions, {len(outlets):,} venue/program records")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,6 @@
 Primary sources: the IACR archive and IACR journal sites. Records are retained
 with source URLs so coverage and possible ePrint duplicates can be audited.
 """
-import csv
 import argparse
 import re
 import time
@@ -14,6 +13,7 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from tools.shards import write_shards
 
 START_YEAR, END_YEAR = 2017, 2026
 YEAR_RE = r"(201[7-9]|202[0-6])"
@@ -298,27 +298,40 @@ def collect_cic():
 
 
 def main():
+    global START_YEAR, END_YEAR, YEAR_RE
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-crossref-proceedings", action="store_true", help="skip recent Springer/Crossref proceedings supplement")
+    ap.add_argument("--out-dir", default="data/iacr_publications", help="year-sharded output directory")
+    ap.add_argument("--start-year", type=int, default=2017)
+    ap.add_argument("--end-year", type=int, default=2026)
+    ap.add_argument("--year", type=int, help="refresh only this year; preserve other shards")
     args = ap.parse_args()
+    if args.start_year > args.end_year:
+        ap.error("--start-year must not exceed --end-year")
+    START_YEAR, END_YEAR = ((args.year, args.year) if args.year is not None
+                            else (args.start_year, args.end_year))
+    if not 1000 <= START_YEAR <= END_YEAR <= 9999:
+        ap.error("years must have four digits")
+    YEAR_RE = "(" + "|".join(map(str, range(START_YEAR, END_YEAR + 1))) + ")"
     records = collect_archive()
     if not args.no_crossref_proceedings:
         records.extend(collect_crossref_proceedings())
     records.extend(collect_rwc())
-    for args in [
+    for journal_args in [
         ("TCHES", "https://tches.iacr.org/index.php/TCHES/issue/archive", "https://tches.iacr.org/"),
         ("ToSC", "https://tosc.iacr.org/index.php/ToSC/en/issue/archive", "https://tosc.iacr.org/"),
     ]:
         try:
-            records.extend(collect_ojs(*args))
+            records.extend(collect_ojs(*journal_args))
         except requests.RequestException as e:
-            print(f"journal skipped: {args[0]}: {e}")
+            print(f"journal skipped: {journal_args[0]}: {e}")
     records.extend(collect_crossref_joc())
     records.extend(collect_cic())
     # Keep distinct publication records but eliminate repeated crawl URLs.
     unique = {}
+    selected_years = set(map(str, range(START_YEAR, END_YEAR + 1)))
     for r in records:
-        if r["title"] and r["year"]:
+        if r["title"] and str(r["year"]) in selected_years:
             # Keep the project aligned to the ten venues in its venue scope.
             v = r["venue"].upper()
             if "CHES" in v: r["venue"] = "TCHES"
@@ -330,9 +343,8 @@ def main():
             elif v == "CRYPTO" or v.startswith("CRYPTO "): r["venue"] = "CRYPTO"
             unique.setdefault((r["year"], r["venue"], r["title"].casefold()), r)
     out = sorted(unique.values(), key=lambda r: (r["year"], r["venue"], r["title"].casefold()))
-    with open("iacr_publications.csv", "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=HEADER, lineterminator="\n"); w.writeheader(); w.writerows(out)
-    print(f"Wrote {len(out)} records to iacr_publications.csv")
+    write_shards(args.out_dir, HEADER, out, years=range(START_YEAR, END_YEAR + 1))
+    print(f"Wrote {len(out)} records to {args.out_dir}")
     from collections import Counter
     print("By venue/year:")
     for (venue, year), count in sorted(Counter((r["venue"], r["year"]) for r in out).items()):
