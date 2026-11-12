@@ -7,7 +7,7 @@ import tempfile
 import unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 if __package__:
     from .shards import iter_dict_rows, read_header
@@ -19,6 +19,8 @@ TOTAL_BUDGET = 7_000_000
 FILE_BUDGET = 1_500_000
 FIELDS = {"标题", "作者", "关键词", "PDF链接", "分类"}
 PUBLICATION_FIELDS = {"title", "authors", "year", "venue", "publication_type", "url", "doi"}
+LINK_PRIORITY = {kind: rank for rank, kind in enumerate(("eprint", "doi", "ojs", "index", "none"))}
+LINK_KINDS = set(LINK_PRIORITY)
 
 
 def normalized_title(title):
@@ -79,24 +81,70 @@ def encode(value):
 def safe_url(value):
     value = (value or "").strip()
     parsed = urlsplit(value)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         return ""
     if parsed.hostname == "eprint.iacr.org":
         try:
             return landing_url(value)[0]
         except ValueError:
             return ""
-    return value if ".pdf" not in value.casefold() else ""
+    decoded = unquote(value).casefold()
+    if ".pdf" in decoded or re.search(r"/(?:downloads?|bitstream|content/pdf)(?:/|$|[?#])", decoded):
+        return ""
+    if any(key.casefold() in {"download", "attachment"} or
+           (key.casefold() in {"format", "type", "output"} and val.casefold() in {"pdf", "download"})
+           for key, val in parse_qsl(parsed.query, keep_blank_values=True)):
+        return ""
+    return value
 
 
-def publication_url(row):
-    url = safe_url(row.get("url", ""))
-    if url:
-        return url
-    doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", row.get("doi", "").strip(), flags=re.I)
+def doi_url(value):
+    doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", (value or "").strip(), flags=re.I)
     if re.fullmatch(r"10\.[0-9]{4,9}/\S+", doi):
         return safe_url("https://doi.org/" + quote(doi, safe="/():-._~"))
     return ""
+
+
+def ojs_url(value):
+    parsed = urlsplit((value or "").strip())
+    if parsed.hostname not in {"tches.iacr.org", "tosc.iacr.org"} or parsed.scheme not in {"http", "https"}:
+        return ""
+    match = re.fullmatch(r"(.*/article)/(?:view|download)/([0-9]+)(?:\.pdf)?(?:/.*)?", parsed.path, re.I)
+    return f"https://{parsed.hostname}{match[1]}/view/{match[2]}" if match else ""
+
+
+def link_key(row):
+    return f"{normalized_title(clean_text(row['title']))}|{int(row['year'])}"
+
+
+def publication_link(row, landings=None):
+    raw = row.get("url", "").strip()
+    parsed = urlsplit(raw)
+    if parsed.hostname == "eprint.iacr.org":
+        try:
+            return {"u": landing_url(raw)[0], "k": "eprint"}
+        except ValueError:
+            pass
+    cached = (landings or {}).get(link_key(row), {}) if "title" in row and "year" in row else {}
+    doi = doi_url(row.get("doi", ""))
+    if not doi and parsed.hostname in {"doi.org", "dx.doi.org"}:
+        doi = doi_url(raw)
+    if not doi and cached.get("k") == "doi":
+        doi = doi_url(cached.get("u", ""))
+    if doi:
+        return {"u": doi, "k": "doi"}
+    ojs = ojs_url(raw)
+    if ojs:
+        return {"u": ojs, "k": "ojs"}
+    index = safe_url(cached.get("u", "")) if cached.get("k") == "index" else ""
+    index = index or safe_url(row.get("source", ""))
+    if not index and parsed.hostname and (parsed.hostname == "iacr.org" or parsed.hostname.endswith(".iacr.org")):
+        index = safe_url(raw)
+    return {"u": index, "k": "index"} if index else {"u": "", "k": "none"}
+
+
+def publication_url(row, landings=None):
+    return publication_link(row, landings)["u"]
 
 
 def publication_source(row):
@@ -118,20 +166,23 @@ def payloads(records, input_counts, dedupe):
         items.sort(key=lambda item: (-item["y"], item["t"].casefold(), item["u"]))
         output[f"{year}.json"] = encode(items)
     output["manifest.json"] = encode({
-        "version": 2, "count": len(records), "sourceCount": sum(input_counts.values()),
+        "version": 3, "count": len(records), "sourceCount": sum(input_counts.values()),
         "inputCounts": input_counts, "counts": {source: sum(p['s'] == source for p in records)
                                                  for source in ("eprint", "conference", "journal")},
         "dedupe": dedupe, "duplicatesRemoved": sum(input_counts.values()) - len(records),
         "years": years, "snippetLength": 0,
+        "linkKinds": {kind: sum(p["lk"] == kind for p in records) for kind in sorted(LINK_KINDS)},
+        "alsoLinkKinds": {kind: sum(p.get("alk") == kind for p in records) for kind in sorted(LINK_KINDS)},
         "files": [{"y": year, "file": f"{year}.json", "n": len(grouped[year])} for year in years],
     })
     return output
 
 
-def build_index(source, outdir, *, publications=None, total_budget=TOTAL_BUDGET, file_budget=FILE_BUDGET):
+def build_index(source, outdir, *, publications=None, link_cache=None, total_budget=TOTAL_BUDGET, file_budget=FILE_BUDGET):
     if not FIELDS <= set(read_header(source)):
         raise ValueError("Source is missing required ePrint CSV columns")
     unique, urls = {}, set()
+    landings = json.loads(Path(link_cache).read_text(encoding="utf-8")) if link_cache and Path(link_cache).exists() else {}
     input_counts = {"eprint": 0, "conference": 0, "journal": 0}
     dedupe = {"eprint": 0, "publicationVenueYear": 0, "eprintOverlap": 0, "publicationTitle": 0}
     for row in sorted(iter_dict_rows(source), key=lambda r: -landing_url(r["PDF链接"])[1]):
@@ -147,14 +198,14 @@ def build_index(source, outdir, *, publications=None, total_budget=TOTAL_BUDGET,
         urls.add(url)
         unique[key] = {"t": title, "a": short_authors(row["作者"]), "y": year,
                        "c": clean_text(row["分类"]), "k": clean_text(row["关键词"]),
-                       "u": url, "s": "eprint", "v": "ePrint"}
+                       "u": url, "s": "eprint", "v": "ePrint", "lk": "eprint"}
     publication_keys = set()
     if publications is not None:
         if not PUBLICATION_FIELDS <= set(read_header(publications)):
             raise ValueError("Source is missing required publication CSV columns")
         rows = sorted(iter_dict_rows(publications), key=lambda r: (
             -int(r["year"]), 0 if publication_source(r) == "journal" else 1,
-            r["venue"].casefold(), not bool(publication_url(r)), r["url"]))
+            r["venue"].casefold(), LINK_PRIORITY[publication_link(r, landings)["k"]], r["url"]))
         for row in rows:
             kind = publication_source(row)
             input_counts[kind] += 1
@@ -163,7 +214,8 @@ def build_index(source, outdir, *, publications=None, total_budget=TOTAL_BUDGET,
             if not key:
                 raise ValueError("Publication has no normalized title")
             year = int(row["year"])
-            label, url = venue_label(row), publication_url(row)
+            label, link = venue_label(row), publication_link(row, landings)
+            url = link["u"]
             publication_key = (key, clean_text(row["venue"]).casefold(), year)
             if publication_key in publication_keys:
                 dedupe["publicationVenueYear"] += 1
@@ -178,9 +230,10 @@ def build_index(source, outdir, *, publications=None, total_budget=TOTAL_BUDGET,
                     existing["al"] = f"also published at {label}"
                     if url:
                         existing["au"] = url
+                        existing["alk"] = link["k"]
                 continue
             unique[key] = {"t": title, "a": short_authors(row["authors"]), "y": year,
-                           "c": "", "k": "", "u": url, "s": kind, "v": label}
+                           "c": "", "k": "", "u": url, "s": kind, "v": label, "lk": link["k"]}
     if not unique:
         raise ValueError("Source contains no papers")
     output = payloads(list(unique.values()), input_counts, dedupe)
@@ -208,6 +261,7 @@ def build_index(source, outdir, *, publications=None, total_budget=TOTAL_BUDGET,
         print(f"  {shard['file']}: {shard['n']:,} records; {len(output[shard['file']]):,} bytes")
     print(f"  manifest.json: {len(output['manifest.json']):,} bytes")
     print(f"Input sources: {input_counts}; indexed sources: {manifest['counts']}")
+    print(f"Link kinds: {manifest['linkKinds']}; also-published link kinds: {manifest['alsoLinkKinds']}")
     print(f"{input_counts['eprint']:,} eprint + {input_counts['conference'] + input_counts['journal']:,} publications "
           f"− {manifest['duplicatesRemoved']:,} duplicates = {len(unique):,} unique titles; dedupe: {dedupe}")
     print(f"No abstract snippets; total payload: {total_size:,} bytes "
@@ -220,9 +274,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=ROOT / "data/papers_merged", help="source CSV shard directory")
     parser.add_argument("--publications", type=Path, default=ROOT / "data/iacr_publications", help="conference/journal CSV shard directory")
+    parser.add_argument("--link-cache", type=Path, default=ROOT / "data/link_landing.json", help="OpenAlex DOI / proceedings-index cache")
     parser.add_argument("--out-dir", type=Path, default=ROOT / "docs/data", help="generated search JSON directory")
     args = parser.parse_args()
-    build_index(args.source, args.out_dir, publications=args.publications)
+    build_index(args.source, args.out_dir, publications=args.publications, link_cache=args.link_cache)
 
 
 if __name__ == "__main__":

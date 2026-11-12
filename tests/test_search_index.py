@@ -6,10 +6,12 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from html.parser import HTMLParser
 from pathlib import Path
 
 from tools import build_search_index as search
+from tools import resolve_links as resolver
 from tools.shards import write_shards
 
 
@@ -52,7 +54,8 @@ class SearchIndexTests(unittest.TestCase):
         self.assertEqual(rows[1]["s"], "eprint")
         self.assertEqual(rows[1]["v"], "ePrint")
         for row in rows:
-            self.assertEqual(set(row), {"t", "a", "y", "c", "k", "u", "s", "v"})
+            self.assertEqual(set(row), {"t", "a", "y", "c", "k", "u", "s", "v", "lk"})
+            self.assertEqual(row["lk"], "eprint")
             self.assertRegex(row["u"], r"^https://eprint\.iacr\.org/2026/\d+$")
             self.assertNotIn("abstract", json.dumps(row).lower())
         self.assertNotIn(".pdf", (self.output / "2026.json").read_text())
@@ -85,6 +88,7 @@ class SearchIndexTests(unittest.TestCase):
         self.assertEqual((merged["s"], merged["u"], merged["v"]), ("eprint", "https://eprint.iacr.org/2024/001", "CRYPTO 2024"))
         self.assertEqual(merged["al"], "also published at CRYPTO 2024")
         self.assertEqual(merged["au"], "https://doi.org/10.1000/secure")
+        self.assertEqual(merged["alk"], "doi")
         self.assertEqual(rows["a journal result"]["s"], "journal")
         self.assertEqual(rows["a journal result"]["v"], "TCHES")
         self.assertEqual(rows["conference only"]["v"], "RWC 2022")
@@ -117,7 +121,74 @@ class SearchIndexTests(unittest.TestCase):
         self.build(publications=self.publications)
         paper = next(row for row in self.output_rows() if row["s"] == "conference")
         self.assertEqual(paper["u"], "")
+        self.assertEqual(paper["lk"], "none")
         self.assertNotIn(".pdf", json.dumps(self.output_rows()).lower())
+
+    def test_link_priority_and_proceedings_fallback(self):
+        row = {"title":"Result", "year":"2024", "url":"./chapter.pdf",
+               "doi":"", "source":"https://www.iacr.org/archive/crypto2024/crypto2024-index.html"}
+        cache = {search.link_key(row): {"u":"https://doi.org/10.1000/resolved", "k":"doi"}}
+        self.assertEqual(search.publication_link(row, cache), {"u":"https://doi.org/10.1000/resolved", "k":"doi"})
+        self.assertEqual(search.publication_link({**row, "doi":"10.1000/original"}, cache)["u"], "https://doi.org/10.1000/original")
+        self.assertEqual(search.publication_link(row), {"u":row["source"], "k":"index"})
+        self.assertEqual(search.publication_link({**row, "source":""}), {"u":"", "k":"none"})
+        ojs = {**row, "url":"http://tches.iacr.org/index.php/TCHES/article/download/123/456"}
+        self.assertEqual(search.publication_link(ojs), {"u":"https://tches.iacr.org/index.php/TCHES/article/view/123", "k":"ojs"})
+        self.assertEqual(search.publication_link(ojs, cache)["k"], "doi")
+        self.assertEqual(search.publication_link({**row, "url":"https://eprint.iacr.org/2024/1.pdf", "doi":"10.1000/other"}, cache)["k"], "eprint")
+
+    def test_index_links_survive_canonical_merge_and_cache_loading(self):
+        self.source_rows([["Preprint", "", "", "", "https://eprint.iacr.org/2024/001.pdf", ""]])
+        fields = ["title", "authors", "year", "venue", "publication_type", "url", "doi", "source"]
+        index = "https://www.iacr.org/archive/crypto2024/crypto2024-index.html"
+        write_shards(self.publications, fields, [["Preprint", "", "2024", "CRYPTO", "conference", "./first.pdf", "", index],
+            ["New result", "", "2024", "CRYPTO", "conference", "./second.pdf", "", index]])
+        cache = self.root / "links.json"
+        cache.write_text(json.dumps({"new result|2024":{"u":"https://doi.org/10.1000/new", "k":"doi"}}))
+        manifest = self.build(publications=self.publications, link_cache=cache)
+        rows = {r["t"]:r for r in self.output_rows()}
+        self.assertEqual((rows["Preprint"]["au"], rows["Preprint"]["alk"]), (index, "index"))
+        self.assertEqual(rows["New result"]["lk"], "doi")
+        self.assertEqual(manifest["alsoLinkKinds"]["index"], 1)
+
+    def test_duplicate_prefers_article_page_over_index_fallback(self):
+        self.source_rows([["Preprint", "", "", "", "https://eprint.iacr.org/2024/001.pdf", ""]])
+        fields = ["title", "authors", "year", "venue", "publication_type", "url", "doi", "source"]
+        write_shards(self.publications, fields, [
+            ["Article title", "Official author", "2024", "CRYPTO", "conference", "https://doi.org/10.1000/paper", "10.1000/paper", "https://iacr.org/index.html"],
+            ["ARTICLE TITLE", "Archive author", "2024", "CRYPTO", "conference", "./chapter.pdf", "", "https://iacr.org/index.html"]])
+        self.build(publications=self.publications)
+        article = next(r for r in self.output_rows() if r["s"] == "conference")
+        self.assertEqual((article["t"], article["a"], article["lk"]), ("Article title", "Official author", "doi"))
+
+    def test_direct_downloads_are_rejected_and_ojs_galleys_normalized(self):
+        for url in ["https://iacr.org/a%2Epdf", "https://iacr.org/download/1", "https://iacr.org/a?download=1",
+                    "https://iacr.org/a?format=PDF", "https://iacr.org/bitstream/1", "http://iacr.org/page"]:
+            self.assertEqual(search.safe_url(url), "", url)
+        self.assertEqual(search.ojs_url("https://tosc.iacr.org/index.php/ToSC/article/view/12/34"),
+                         "https://tosc.iacr.org/index.php/ToSC/article/view/12")
+
+    def test_shipped_link_contract_and_budgets(self):
+        paths = list((ROOT / "docs/data").glob("*.json"))
+        self.assertLessEqual(sum(p.stat().st_size for p in paths), search.TOTAL_BUDGET)
+        rows = [r for p in paths if p.stem.isdigit() for r in json.loads(p.read_text())]
+        manifest = json.loads((ROOT / "docs/data/manifest.json").read_text())
+        self.assertEqual(len(rows), manifest["count"])
+        self.assertEqual(manifest["count"], 19070)
+        self.assertEqual(manifest["counts"], {"eprint":17556, "conference":582, "journal":932})
+        for path in paths:
+            self.assertNotIn(".pdf", path.read_text().casefold(), path.name)
+        for row in rows:
+            self.assertIn(row["lk"], search.LINK_KINDS)
+            self.assertEqual(row["lk"] == "none", not bool(row["u"]))
+            for field, kind in [("u", "lk"), ("au", "alk")]:
+                if row.get(field):
+                    self.assertIn(row[kind], search.LINK_KINDS - {"none"})
+                    self.assertTrue(row[field].startswith("https://"))
+                    self.assertEqual(search.safe_url(row[field]), row[field])
+        cache = ROOT / "data/link_landing.json"
+        self.assertLess(cache.stat().st_size, resolver.CACHE_BUDGET)
+        self.assertTrue(all(resolver.valid_entry(entry) for entry in json.loads(cache.read_text()).values()))
 
     def test_impossible_budget_does_not_change_previous_payload(self):
         self.source_rows([["Title", "", "", "", "https://eprint.iacr.org/2026/001.pdf", ""]])
@@ -128,6 +199,15 @@ class SearchIndexTests(unittest.TestCase):
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.output.glob("*.json")})
         with self.assertRaisesRegex(ValueError, "exceeds budget"):
             self.build(file_budget=1)
+
+    def test_pdf_postcondition_preserves_previous_payload(self):
+        self.source_rows([["Title", "", "", "", "https://eprint.iacr.org/2026/001.pdf", ""]])
+        self.build()
+        before = {p.name:p.read_bytes() for p in self.output.glob("*.json")}
+        self.source_rows([["bad.pdf title", "", "", "", "https://eprint.iacr.org/2026/001.pdf", ""]])
+        with self.assertRaisesRegex(ValueError, "PDF reference"):
+            self.build()
+        self.assertEqual(before, {p.name:p.read_bytes() for p in self.output.glob("*.json")})
 
     def test_urls_reject_other_hosts_and_normalize_to_landing_page(self):
         self.assertEqual(search.landing_url("http://eprint.iacr.org/2025/1.pdf?download=1"),
@@ -145,6 +225,58 @@ class SearchIndexTests(unittest.TestCase):
         self.build()
         self.assertFalse((self.output / "2017.json").exists())
         self.assertTrue((self.output / "notes.txt").exists())
+
+
+class LinkResolverTests(unittest.TestCase):
+    def test_confident_titles_year_tolerance_and_conflicts(self):
+        row = {"title":r"Secure $\mathsf{MPC}$: Protocols", "year":"2024"}
+        hit = {"title":"Secure MPC Protocols", "publication_year":2025, "doi":"https://doi.org/10.1000/match"}
+        self.assertEqual(resolver.choose_doi(row, [hit]), hit["doi"])
+        for bad in [{**hit, "publication_year":2026}, {**hit, "doi":None}, {**hit, "title":"Unrelated MPC construction"}]:
+            self.assertEqual(resolver.choose_doi(row, [bad]), "")
+        self.assertEqual(resolver.choose_doi(row, [hit, {**hit, "doi":"10.1000/conflict"}]), "")
+        near = {**hit, "title":"Secure MPC Protocol"}
+        self.assertEqual(resolver.choose_doi(row, [near]), hit["doi"])
+
+    def test_targets_exclude_convertible_eprint_and_ojs_links(self):
+        for url in ["./chapter.pdf", "/archive/paper.PDF", "https://iacr.org/chapter.pdf"]:
+            self.assertTrue(resolver.needs_resolution({"url":url}))
+        for url in ["https://eprint.iacr.org/2024/001.pdf", "https://tches.iacr.org/article/download/1/2.pdf", "https://doi.org/10.1000/paper"]:
+            self.assertFalse(resolver.needs_resolution({"url":url}))
+
+    def test_lookup_parameters_and_doi_acceptance(self):
+        session = Mock()
+        response = session.get.return_value
+        response.status_code = 200
+        response.json.return_value = {"results":[{"title":"My paper", "publication_year":2024, "doi":"10.1000/paper"}]}
+        with patch.object(resolver.time, "sleep"):
+            self.assertEqual(resolver.lookup(session, {"title":"My paper", "year":"2024"}, .5, [0]), "https://doi.org/10.1000/paper")
+        self.assertEqual(session.get.call_args.kwargs["params"],
+                         {"filter":"title.search:My paper", "per-page":5, "select":"doi,title,publication_year"})
+
+    def test_quota_fallback_resume_and_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "links.json"
+            rows = [{"title":"First", "year":"2024", "url":"./one.pdf", "source":"https://iacr.org/index.html"},
+                    {"title":"Second", "year":"2024", "url":"./two.pdf", "source":""}]
+            session = Mock(headers={})
+            response = session.get.return_value
+            response.status_code = 429
+            response.json.return_value = {"dailyRemainingUsd":0}
+            with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), patch.object(resolver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+                report = resolver.resolve_links("unused", cache, session=session)
+            self.assertEqual((report["rows"], report["doi"], report["index"], report["unmatched"]), (2, 0, 1, 1))
+            self.assertTrue(report["quotaExhausted"])
+            self.assertEqual(session.get.call_count, 1)
+            self.assertIn("mailto=wangfangzhen23@mails.ucas.ac.cn", session.headers["User-Agent"])
+            with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), patch.object(resolver, "lookup") as lookup, contextlib.redirect_stdout(io.StringIO()):
+                resolver.resolve_links("unused", cache, session=session)
+                lookup.assert_not_called()
+            with patch.object(resolver, "iter_dict_rows", return_value=iter(rows)), patch.object(resolver, "lookup", return_value="https://doi.org/10.1000/paper") as lookup, contextlib.redirect_stdout(io.StringIO()):
+                report = resolver.resolve_links("unused", cache, session=session, retry_fallbacks=True, delay=0)
+                self.assertEqual(lookup.call_args.args[2], .5)
+            self.assertEqual(report["doi"], 2)
+            self.assertTrue(all(entry["k"] == "doi" for entry in json.loads(cache.read_text()).values()))
 
 
 class PageTests(unittest.TestCase):
@@ -171,6 +303,9 @@ class PageTests(unittest.TestCase):
         self.assertIn("data/manifest.json", html)
         self.assertIn("prefers-color-scheme:dark", html)
         self.assertNotIn("http://", html)
+        self.assertNotIn(".pdf", html.casefold())
+        self.assertIn("opens the proceedings index page", html)
+        self.assertIn("OpenAlex", html)
         self.assertEqual((ROOT / "docs/.nojekyll").stat().st_size, 0)
 
     @unittest.skipUnless(shutil.which("node"), "Node is optional for JavaScript unit checks")
@@ -193,6 +328,11 @@ class PageTests(unittest.TestCase):
         assert(SearchCore.matches(j, [], 2017, 2026, '', 'journal', 'TCHES'));
         assert(!SearchCore.matches(j, [], 2017, 2026, '__uncategorized__', 'journal', ''));
         assert(!SearchCore.safeLink('https://iacr.org/file.pdf'));
+        assert(!SearchCore.safeLink('https://iacr.org/file%2Epdf'));
+        assert(!SearchCore.safeLink('https://iacr.org/download/1'));
+        assert(!SearchCore.safeLink('https://iacr.org/file?format=PDF'));
+        assert(!SearchCore.safeLink('https://iacr.org/file?download=1'));
+        assert(!SearchCore.safeLink('http://iacr.org/page'));
         assert(!SearchCore.safeLink('javascript:alert(1)'));
         assert(SearchCore.safeLink('https://doi.org/10.1000/paper'));
         assert.deepEqual(SearchCore.highlightRanges('A [test] and a+b', ['[test]', 'a+b']), [[2,8],[13,16]]);

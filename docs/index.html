@@ -59,6 +59,7 @@
     .venue-badge { padding:2px 8px; border:1px solid var(--accent); border-radius:4px; color:var(--accent); font-size:11px; font-weight:700; }
     .source-chip { padding:3px 8px; border-radius:4px; background:var(--wash); color:var(--muted); font-size:11px; }
     .also-published { margin:10px 0 0; font-size:12px; color:var(--accent); }
+    .link-note { margin-left:8px; color:var(--muted); font:normal 11px/1.5 system-ui,sans-serif; letter-spacing:normal; }
     mark { color:var(--ink); background:var(--mark); padding:0 .04em; border-radius:2px; }
     .state { padding:54px 12px 64px; text-align:center; }
     .state h2 { margin:0 0 10px; font:normal 29px/1.3 Georgia,"Times New Roman",serif; }
@@ -154,7 +155,7 @@
       <noscript><p>This search needs JavaScript enabled. The source CSV corpus is available in the repository.</p></noscript>
     </main>
     <footer>
-      <p><span id="corpus-summary">ePrint 17,556 · conference 582 · journal 932 · deduped total 19,070 · 2017–2026</span><br>Metadata from IACR ePrint (CC0) and IACR/Crossref · no PDFs hosted.</p>
+      <p><span id="corpus-summary">ePrint 17,556 · conference 582 · journal 932 · deduped total 19,070 · 2017–2026</span><br>Metadata from IACR ePrint (CC0) and IACR/Crossref · <a href="https://openalex.org/" target="_blank" rel="noopener noreferrer">OpenAlex</a> DOI resolution · no PDFs hosted.</p>
       <p>Built from <a href="https://github.com/wang2000star/paper-pull" target="_blank" rel="noopener noreferrer">paper-pull ↗</a><br>ePrint landing pages and publication links where available.</p>
     </footer>
   </div>
@@ -172,8 +173,14 @@
         (source === "all" || paper.s === source) && (!venue || venueFamily(paper) === venue) &&
         words.every(word => paper.searchText.includes(word));
       const safeLink = value => {
-        if (!value || /\.pdf/i.test(value)) return false;
-        try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password; }
+        if (!value) return false;
+        try {
+          const url = new URL(value), decoded = decodeURIComponent(value).toLowerCase();
+          if (url.protocol !== "https:" || url.username || url.password || /[.]p[d]f/i.test(decoded) ||
+              /\/(?:downloads?|bitstream|content\/pdf)(?:\/|$|[?#])/i.test(decoded)) return false;
+          return ![...url.searchParams].some(([key, val]) => ["download", "attachment"].includes(key.toLowerCase()) ||
+            (["format", "type", "output"].includes(key.toLowerCase()) && ["pdf", "download"].includes(val.toLowerCase())));
+        }
         catch { return false; }
       };
       const compare = mode => (a, b) => mode === "title"
@@ -268,6 +275,7 @@
           if (paper.u) title.append(element("span", "sr-only", " (opens in a new tab)"));
           else title.tabIndex = -1;
           heading.append(title);
+          if (paper.lk === "index") heading.append(element("span", "link-note", "opens the proceedings index page"));
           card.append(heading, element("p", "authors", paper.a || "Authors not listed"),
             element("p", "paper-meta", `${paper.y}${paper.c ? ` · ${paper.c}` : ""}`));
           const badges = element("div", "badges");
@@ -283,7 +291,9 @@
             const line = element("p", "also-published");
             const also = element(paper.au ? "a" : "span", "", `正式版 / ${paper.al}`);
             if (paper.au) { also.href = paper.au; also.target = "_blank"; also.rel = "noopener noreferrer"; }
-            line.append(also); card.append(line);
+            line.append(also);
+            if (paper.alk === "index") line.append(element("span", "link-note", "opens the proceedings index page"));
+            card.append(line);
           }
           fragment.append(card);
         }
@@ -305,7 +315,7 @@
           try {
             if (location.protocol === "file:") throw new Error("file protocol");
             const manifest = await json("data/manifest.json");
-            if (manifest.version !== 2 || manifest.snippetLength !== 0 || !Array.isArray(manifest.files) || !manifest.files.length) throw new Error("Invalid manifest");
+            if (manifest.version !== 3 || manifest.snippetLength !== 0 || !Array.isArray(manifest.files) || !manifest.files.length) throw new Error("Invalid manifest");
             const shards = await Promise.all(manifest.files.map(async shard => {
               if (!/^\d{4}\.json$/.test(shard.file)) throw new Error("Invalid shard path");
               const rows = await json(`data/${shard.file}`);
@@ -317,6 +327,8 @@
               typeof paper.t === "string" && typeof paper.a === "string" && typeof paper.k === "string" &&
               typeof paper.c === "string" && Number.isInteger(paper.y) && typeof paper.u === "string" &&
               ["eprint", "conference", "journal"].includes(paper.s) && typeof paper.v === "string" &&
+              ["eprint", "doi", "ojs", "index", "none"].includes(paper.lk) && ((paper.lk === "none") === !paper.u) &&
+              (!paper.au || ["eprint", "doi", "ojs", "index"].includes(paper.alk)) &&
               (!paper.u || SearchCore.safeLink(paper.u)) && (!paper.au || SearchCore.safeLink(paper.au)) &&
               (paper.s !== "eprint" || /^https:\/\/eprint\.iacr\.org\/\d{4}\/\d+$/.test(paper.u)))) throw new Error("Invalid paper metadata");
             papers = rows.map(SearchCore.prepare);

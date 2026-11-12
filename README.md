@@ -117,14 +117,35 @@ TCHES, ToSC, JoC, CiC and RWC. The root `index.html` remains the CryptoScope
 dashboard. Search runs in the browser with AND terms, quoted phrases,
 year/category/source/venue filters, sorting, and shareable query URLs.
 ePrint titles open the original **abstract landing page**. Publication titles
-use their non-PDF URL or DOI, or remain plain text if neither is available.
+use DOI or OJS article landing pages, with proceedings index pages as the
+fallback. Index links carry an explicit note; a title remains plain text if
+no safe page exists. Every result link uses HTTPS and excludes direct downloads.
 No PDFs are hosted or downloaded by this page.
 
 After refreshing the corpus, regenerate and commit the search metadata:
 
 ```bash
+python3 tools/resolve_links.py
 python3 tools/build_search_index.py
 ```
+
+The resolver stores title/year matches in `data/link_landing.json` (under
+1,000,000 bytes). It queries [OpenAlex](https://openalex.org/) for archival
+PDF links, accepting normalized title similarity ≥ 0.92 and publication years
+within ±1. Requests carry the project contact address and are spaced at least
+0.5 seconds apart. Confident matches use DOI landing URLs; other rows use their
+`source` proceedings index, or an empty URL when no safe source exists. The
+current inputs have 2,775 unresolved PDF links (the 2,771 archive links counted
+on `www.iacr.org` or relative paths, plus four on other IACR hosts); six ePrint
+PDF URLs convert directly to abstract pages without a lookup.
+
+The cache is resumable and written after each lookup. OpenAlex returned HTTP
+429 with its shared anonymous daily budget exhausted during this repair, so
+the committed cache contains 2,775 index fallbacks and zero newly resolved
+DOIs. Existing DOI and OJS links remain usable. To retry fallbacks after quota
+resets, run `python3 tools/resolve_links.py --retry-fallbacks`, then rebuild.
+An existing `OPENALEX_API_KEY` environment variable is supported when available.
+Quota exhaustion stops API calls for that run while preserving safe fallbacks.
 
 The builder reads `data/papers_merged/` and `data/iacr_publications/` and writes
 `docs/data/<year>.json` plus a small `manifest.json`. It keeps one result per
@@ -147,9 +168,13 @@ freely; `src` accepts `eprint`, `conference`, `journal`, or `all`.
 The JSON payload is limited to 7,000,000 bytes in total and 1,500,000 bytes per
 file. **No abstract snippets are generated, fetched, or searched**;
 `snippetLength` is always zero. Records contain compact title/author/year/
-category/keyword/link fields plus `s` (source), `v` (venue), and optional
-`al`/`au` (also-published label/link). PDF-only publication URLs and unsafe or
-relative links are excluded, using a DOI fallback where available. Year files
+category/keyword/link fields plus `s` (source), `v` (venue), `lk` (link kind:
+`eprint`, `doi`, `ojs`, `index`, or `none`), and optional `al`/`au`/`alk`
+(also-published label/link/kind). Link priority is ePrint landing page, row or
+resolved DOI, OJS article, then source index. Unsafe and relative links are
+excluded, and OJS galley/download URLs normalize to their article page. The
+builder rejects any PDF reference in the complete JSON payload before writing
+files and reports primary and also-published link-kind counts. Year files
 load in parallel on the first interaction; subsequent searches need no
 network connection. The builder reports input/indexed source counts, dedupe
 reduction, per-year record counts, and UTF-8 byte sizes.
